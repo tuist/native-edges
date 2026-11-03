@@ -16,7 +16,7 @@ const MAX_STEPS: usize = 6;
 
 #[derive(Queryable, Selectable, Insertable, AsChangeset)]
 #[diesel(table_name = schema::conversations)]
-struct Conversation {
+struct StoredConversation {
     id: String,
     title: String,
     updated_at: i64,
@@ -30,7 +30,7 @@ struct Message {
     text: String,
 }
 
-/// The conversations screen.
+/// Every conversation stored on this device, newest first.
 #[derive(Debug, uniffi::Record)]
 pub struct ConversationList {
     pub title: String,
@@ -46,9 +46,9 @@ pub struct ConversationRow {
     pub url: String,
 }
 
-/// One conversation's screen.
+/// One conversation and its messages.
 #[derive(Debug, uniffi::Record)]
-pub struct ConversationScreen {
+pub struct Conversation {
     pub id: String,
     pub title: String,
     pub messages: Vec<ChatMessage>,
@@ -71,9 +71,9 @@ struct Item {
 
 pub fn list(store: &Store) -> Result<ConversationList> {
     let connection = &mut *store.connection();
-    let conversations: Vec<Conversation> = schema::conversations::table
+    let conversations: Vec<StoredConversation> = schema::conversations::table
         .order(schema::conversations::updated_at.desc())
-        .select(Conversation::as_select())
+        .select(StoredConversation::as_select())
         .load(connection)
         .map_err(db)?;
     let mut rows = vec![];
@@ -99,10 +99,10 @@ pub fn list(store: &Store) -> Result<ConversationList> {
     })
 }
 
-pub fn show(store: &Store, id: &str) -> Result<ConversationScreen> {
+pub fn show(store: &Store, id: &str) -> Result<Conversation> {
     let connection = &mut *store.connection();
     let conversation = find(connection, id)?.ok_or_else(not_found)?;
-    Ok(screen(&conversation, &messages(connection, id)?))
+    Ok(assemble(&conversation, &messages(connection, id)?))
 }
 
 /// Sends a message, lets ChatGPT call tools until it answers, and saves the
@@ -112,7 +112,7 @@ pub fn send(
     store: &Store,
     id: Option<&str>,
     text: &str,
-) -> Result<(ConversationScreen, Option<Session>)> {
+) -> Result<(Conversation, Option<Session>)> {
     let text = text.trim();
     if text.is_empty() {
         return Err(Error::new("invalid", "Write a message first"));
@@ -136,7 +136,7 @@ pub fn send(
                 (conversation, input)
             }
             None => (
-                Conversation {
+                StoredConversation {
                     id: new_id()?,
                     title: text.chars().take(40).collect(),
                     updated_at: 0,
@@ -242,7 +242,7 @@ pub fn send(
         })
         .map_err(db)?;
     Ok((
-        screen(&conversation, &messages(connection, &conversation.id)?),
+        assemble(&conversation, &messages(connection, &conversation.id)?),
         renewed,
     ))
 }
@@ -275,7 +275,7 @@ fn run_tool(store: &Store, current: &str, name: &str, arguments: &str) -> Value 
         "list_conversations" => schema::conversations::table
             .filter(schema::conversations::id.ne(current))
             .order(schema::conversations::updated_at.desc())
-            .select(Conversation::as_select())
+            .select(StoredConversation::as_select())
             .load(connection)
             .map(|all| {
                 json!(
@@ -303,10 +303,10 @@ fn run_tool(store: &Store, current: &str, name: &str, arguments: &str) -> Value 
     result.unwrap_or_else(|error| json!({ "error": error.message }))
 }
 
-fn find(connection: &mut SqliteConnection, id: &str) -> Result<Option<Conversation>> {
+fn find(connection: &mut SqliteConnection, id: &str) -> Result<Option<StoredConversation>> {
     schema::conversations::table
         .find(id)
-        .select(Conversation::as_select())
+        .select(StoredConversation::as_select())
         .first(connection)
         .optional()
         .map_err(db)
@@ -329,8 +329,8 @@ fn message(conversation_id: &str, role: &str, text: &str) -> Message {
     }
 }
 
-fn screen(conversation: &Conversation, messages: &[Message]) -> ConversationScreen {
-    ConversationScreen {
+fn assemble(conversation: &StoredConversation, messages: &[Message]) -> Conversation {
+    Conversation {
         id: conversation.id.clone(),
         title: conversation.title.clone(),
         messages: messages
@@ -376,7 +376,7 @@ mod tests {
         for (id, updated_at) in [("aa", 1), ("bb", 2)] {
             let connection = &mut *store.connection();
             diesel::insert_into(schema::conversations::table)
-                .values(Conversation {
+                .values(StoredConversation {
                     id: id.into(),
                     title: format!("Chat {id}"),
                     updated_at,

@@ -74,7 +74,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.tuist.edges.core.ChatMessage
-import dev.tuist.edges.core.Screen
+import dev.tuist.edges.core.Destination
 
 private val Purple = Color(0xFF6F2CFF)
 private val Lavender = Color(0xFFCDB8FF)
@@ -99,7 +99,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Deep links into any screen: adb shell am start -a android.intent.action.VIEW -d edges://conversations/<id>
+    // Deep links into any destination: adb shell am start -a android.intent.action.VIEW -d edges://conversations/<id>
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         intent.data?.toString()?.let { model?.open(it) }
@@ -108,14 +108,14 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun App(model: AppModel) {
-    val screen = model.stack.lastOrNull()
+    val destination = model.stack.lastOrNull()
     BackHandler(enabled = model.stack.size > 1) { model.back() }
     Surface(Modifier.fillMaxSize()) {
         when {
             !model.signedIn -> SignIn(model)
-            screen != null -> {
-                LaunchedEffect(screen.url) { model.load(screen) }
-                if (screen.route == "conversations") Conversations(model) else Chat(model, screen)
+            destination != null -> {
+                LaunchedEffect(destination.url) { model.load(destination) }
+                if (destination.route == "conversations") Conversations(model) else Chat(model, destination)
             }
         }
     }
@@ -226,13 +226,13 @@ private fun Conversations(model: AppModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun Chat(model: AppModel, screen: Screen) {
-    var draft by rememberSaveable(screen.url) { mutableStateOf("") }
-    val conversation = model.conversations[screen.url]
+private fun Chat(model: AppModel, destination: Destination) {
+    var draft by rememberSaveable(destination.url) { mutableStateOf("") }
+    val conversation = model.conversations[destination.url]
     val messages = conversation?.messages.orEmpty()
     val send = {
         if (draft.isNotBlank() && model.sending == null) {
-            model.send(draft.trim(), screen)
+            model.send(draft.trim(), destination)
             draft = ""
         }
     }
@@ -240,7 +240,7 @@ private fun Chat(model: AppModel, screen: Screen) {
         topBar = {
             TopAppBar(
                 title = {
-                    Text(if (screen.route == "new") "New chat" else conversation?.title.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (destination.route == "new") "New chat" else conversation?.title.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 },
                 navigationIcon = {
                     IconButton(onClick = { model.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }

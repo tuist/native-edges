@@ -1,12 +1,12 @@
-//! The navigation catalog. Every screen is declared here, so the edges, the
-//! CLI, and agents can discover them, and every screen has a URL that opens it.
+//! The navigation catalog. Every destination is declared here, so the edges,
+//! the CLI, and agents can discover them, and each one has a URL that opens it.
 
 use serde::Serialize;
 use std::collections::HashMap;
 
 pub const SCHEME: &str = "edges";
 
-/// A screen the edges know how to render.
+/// A destination the edges know how to present.
 #[derive(Debug, Serialize)]
 pub struct Route {
     pub id: &'static str,
@@ -45,9 +45,9 @@ pub static ROUTES: &[Route] = &[
 
 pub type Params = HashMap<String, String>;
 
-/// One entry in a navigation stack.
+/// One entry in a navigation stack: where the person is, not how it looks.
 #[derive(Debug, PartialEq, Eq, uniffi::Record)]
-pub struct Screen {
+pub struct Destination {
     pub route: String,
     pub params: Params,
     pub url: String,
@@ -60,8 +60,8 @@ pub enum Error {
     MissingParam(&'static str),
 }
 
-/// Resolves a deep link into the stack of screens to show, root first.
-pub fn open(url: &str) -> Result<Vec<Screen>, Error> {
+/// Resolves a deep link into the stack of destinations, root first.
+pub fn open(url: &str) -> Result<Vec<Destination>, Error> {
     let rest = url
         .strip_prefix(SCHEME)
         .and_then(|rest| rest.strip_prefix("://"))
@@ -95,8 +95,8 @@ pub fn url(route_id: &str, params: &Params) -> Result<String, Error> {
     Ok(format!("{SCHEME}://{}", segments.join("/")))
 }
 
-fn stack(route: &'static Route, params: Params) -> Result<Vec<Screen>, Error> {
-    let mut screens = Vec::new();
+fn stack(route: &'static Route, params: Params) -> Result<Vec<Destination>, Error> {
+    let mut destinations = Vec::new();
     let mut current = Some(route);
     while let Some(route) = current {
         let own: Params = route
@@ -105,15 +105,15 @@ fn stack(route: &'static Route, params: Params) -> Result<Vec<Screen>, Error> {
             .filter_map(parameter)
             .filter_map(|name| params.get(name).map(|v| (name.to_string(), v.clone())))
             .collect();
-        screens.push(Screen {
+        destinations.push(Destination {
             route: route.id.into(),
             url: url(route.id, &own)?,
             params: own,
         });
         current = route.parent.map(find).transpose()?;
     }
-    screens.reverse();
-    Ok(screens)
+    destinations.reverse();
+    Ok(destinations)
 }
 
 fn matches(route: &Route, segments: &[&str]) -> Option<Params> {
@@ -183,12 +183,12 @@ mod tests {
         assert_eq!(
             stack,
             vec![
-                Screen {
+                Destination {
                     route: "conversations".into(),
                     params: Params::new(),
                     url: "edges://conversations".into()
                 },
-                Screen {
+                Destination {
                     route: "conversation".into(),
                     params: params(&[("id", "3f2a9c1b")]),
                     url: "edges://conversations/3f2a9c1b".into()

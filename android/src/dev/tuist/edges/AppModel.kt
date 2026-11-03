@@ -5,10 +5,10 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import dev.tuist.edges.core.ConversationList
-import dev.tuist.edges.core.ConversationScreen
+import dev.tuist.edges.core.Conversation
 import dev.tuist.edges.core.CoreException
 import dev.tuist.edges.core.DeviceCode
-import dev.tuist.edges.core.Screen
+import dev.tuist.edges.core.Destination
 import dev.tuist.edges.core.conversation
 import dev.tuist.edges.core.conversations
 import dev.tuist.edges.core.isSignedIn
@@ -25,7 +25,7 @@ import dev.tuist.edges.core.signIn as startSignIn
 import dev.tuist.edges.core.signOut as forgetSession
 
 /**
- * Edge state only: which screens are on the stack and what the core returned
+ * Edge state only: which destinations are on the stack and what the core returned
  * for them. Routing, sign-in, ChatGPT, and the database all live in the core.
  */
 class AppModel(private val scope: CoroutineScope, dataDir: String, storage: Keystore) {
@@ -33,11 +33,11 @@ class AppModel(private val scope: CoroutineScope, dataDir: String, storage: Keys
         private set
     var deviceCode by mutableStateOf<DeviceCode?>(null)
         private set
-    var stack by mutableStateOf(emptyList<Screen>())
+    var stack by mutableStateOf(emptyList<Destination>())
         private set
     var list by mutableStateOf<ConversationList?>(null)
         private set
-    val conversations = mutableStateMapOf<String, ConversationScreen>()
+    val conversations = mutableStateMapOf<String, Conversation>()
     var sending by mutableStateOf<String?>(null)
         private set
     var message by mutableStateOf<String?>(null)
@@ -69,15 +69,15 @@ class AppModel(private val scope: CoroutineScope, dataDir: String, storage: Keys
         }
     }
 
-    fun load(screen: Screen) = perform {
-        when (screen.route) {
+    fun load(destination: Destination) = perform {
+        when (destination.route) {
             "conversations" -> list = conversations()
-            "conversation" -> conversations[screen.url] = conversation(screen.params.getValue("id"))
+            "conversation" -> conversations[destination.url] = conversation(destination.params.getValue("id"))
         }
     }
 
-    /** Sends a message; a new conversation then replaces the "new" screen with its own URL. */
-    fun send(text: String, from: Screen) = perform {
+    /** Sends a message; a new conversation then replaces the "new" destination with its own URL. */
+    fun send(text: String, from: Destination) = perform {
         sending = text
         try {
             val reply = background { sendMessage(from.params["id"], text) }

@@ -1,7 +1,7 @@
-//! The terminal edge. It renders the core's screens as text and provides the
+//! The terminal edge. It prints the core's destinations as text and provides the
 //! terminal's platform services: where to keep data, and a private session file.
 
-use edges_core::conversations::{ChatMessage, ConversationScreen};
+use edges_core::conversations::{ChatMessage, Conversation};
 use edges_core::{CoreError, SecureStorage};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -16,14 +16,14 @@ Usage: edges <command>
 Commands:
   login                 Sign in with ChatGPT
   logout                Forget the saved session
-  routes                List every screen and its deep link pattern
-  url <route> [k=v...]  Print the deep link for a screen
-  open [url]            Render the screen a deep link points to (default: edges://conversations)
+  routes                List every destination and its deep link pattern
+  url <route> [k=v...]  Print the deep link for a destination
+  open [url]            Print what a deep link points to (default: edges://conversations)
   send [--to <id>] <message>
                         Send a message; without --to, start a new conversation
   chat [id]             Chat interactively
 
-Deep links open the same screen in the apps:
+Deep links open the same destination in the apps:
   xcrun simctl openurl booted \"$(edges url conversation id=<id>)\"
   adb shell am start -a android.intent.action.VIEW -d edges://conversations";
 
@@ -87,11 +87,11 @@ fn url(route: &str, pairs: &[&str]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Renders the screen a deep link points to, like the apps do.
+/// Prints the destination a deep link points to, like the apps present it.
 fn open(link: &str) -> Result<(), CoreError> {
     let stack = edges_core::open(link.into())?;
-    let screen = stack.last().expect("a stack has at least one screen");
-    match screen.route.as_str() {
+    let destination = stack.last().expect("a stack has at least one destination");
+    match destination.route.as_str() {
         "conversations" => {
             let list = edges_core::conversations()?;
             println!("\x1b[1m{}\x1b[0m\n", list.title);
@@ -100,7 +100,7 @@ fn open(link: &str) -> Result<(), CoreError> {
             }
         }
         "conversation" => {
-            let conversation = edges_core::conversation(screen.params["id"].clone())?;
+            let conversation = edges_core::conversation(destination.params["id"].clone())?;
             println!("\x1b[1m{}\x1b[0m\n", conversation.title);
             conversation.messages.iter().for_each(print_message);
         }
@@ -119,17 +119,21 @@ fn print_message(message: &ChatMessage) {
 }
 
 /// Sends one message and prints what came back after it.
-fn send(id: Option<&str>, text: &str) -> Result<ConversationScreen, CoreError> {
+fn send(id: Option<&str>, text: &str) -> Result<Conversation, CoreError> {
     let before = match id {
         Some(id) => edges_core::conversation(id.into())?.messages.len(),
         None => 0,
     };
-    let screen = edges_core::send(id.map(str::to_string), text.into())?;
-    screen.messages.iter().skip(before + 1).for_each(print_message);
+    let conversation = edges_core::send(id.map(str::to_string), text.into())?;
+    conversation
+        .messages
+        .iter()
+        .skip(before + 1)
+        .for_each(print_message);
     if before == 0 {
-        println!("\x1b[2m  {}\x1b[0m", screen.url);
+        println!("\x1b[2m  {}\x1b[0m", conversation.url);
     }
-    Ok(screen)
+    Ok(conversation)
 }
 
 fn chat(mut id: Option<String>) -> Result<(), CoreError> {

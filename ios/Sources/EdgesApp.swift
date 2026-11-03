@@ -10,7 +10,7 @@ struct EdgesApp: App {
             RootView(model: model)
                 .tint(Color(red: 0.435, green: 0.173, blue: 1))
                 .task { if model.root == nil { model.open(AppModel.root) } }
-                // Deep links into any screen: xcrun simctl openurl booted edges://conversations/<id>
+                // Deep links into any destination: xcrun simctl openurl booted edges://conversations/<id>
                 .onOpenURL { url in model.open(url.absoluteString) }
         }
     }
@@ -24,8 +24,8 @@ struct RootView: View {
             SignInView(model: model)
         } else if let root = model.root {
             NavigationStack(path: $model.path) {
-                ScreenView(model: model, screen: root)
-                    .navigationDestination(for: Screen.self) { ScreenView(model: model, screen: $0) }
+                ScreenView(model: model, destination: root)
+                    .navigationDestination(for: Destination.self) { ScreenView(model: model, destination: $0) }
             }
         }
     }
@@ -86,17 +86,17 @@ struct SignInView: View {
 
 struct ScreenView: View {
     let model: AppModel
-    let screen: Screen
+    let destination: Destination
 
     var body: some View {
         Group {
-            if screen.route == "conversations" {
+            if destination.route == "conversations" {
                 ConversationsView(model: model)
             } else {
-                ChatView(model: model, screen: screen)
+                ChatView(model: model, destination: destination)
             }
         }
-        .task(id: screen) { await model.load(screen) }
+        .task(id: destination) { await model.load(destination) }
     }
 }
 
@@ -106,8 +106,8 @@ struct ConversationsView: View {
     var body: some View {
         let rows = model.list?.rows ?? []
         List(rows, id: \.id) { row in
-            // Each row pushes the screen its deep link resolves to, like any other link.
-            NavigationLink(value: model.screen(for: row.url)) {
+            // Each row pushes the destination its deep link resolves to, like any other link.
+            NavigationLink(value: model.destination(for: row.url)) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(row.title).font(.headline).lineLimit(1)
                     Text(row.subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
@@ -127,7 +127,7 @@ struct ConversationsView: View {
                 }
             }
         }
-        .refreshable { await model.load(Screen(route: "conversations", params: [:], url: AppModel.root)) }
+        .refreshable { await model.load(Destination(route: "conversations", params: [:], url: AppModel.root)) }
         .navigationTitle(model.list?.title ?? "Conversations")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -144,11 +144,11 @@ struct ConversationsView: View {
 
 struct ChatView: View {
     let model: AppModel
-    let screen: Screen
+    let destination: Destination
     @State private var draft = ""
 
     var body: some View {
-        let conversation = model.conversations[screen.url]
+        let conversation = model.conversations[destination.url]
         ScrollView {
             LazyVStack(spacing: 10) {
                 ForEach(Array((conversation?.messages ?? []).enumerated()), id: \.offset) { _, message in
@@ -166,7 +166,7 @@ struct ChatView: View {
         }
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
-        .navigationTitle(screen.route == "new" ? "New Conversation" : conversation?.title ?? "")
+        .navigationTitle(destination.route == "new" ? "New Conversation" : conversation?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) {
             HStack(alignment: .bottom, spacing: 8) {
@@ -192,7 +192,7 @@ struct ChatView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, model.sending == nil else { return }
         draft = ""
-        Task { await model.send(text, from: screen) }
+        Task { await model.send(text, from: destination) }
     }
 }
 

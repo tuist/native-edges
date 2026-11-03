@@ -3,8 +3,8 @@
 //! functions and get records back. The CLI calls the same functions in Rust.
 
 use crate::chatgpt::{self, DeviceCode, Session};
-use crate::conversations::{self, ConversationList, ConversationScreen};
-use crate::routes::{self, Params, Screen};
+use crate::conversations::{self, Conversation, ConversationList};
+use crate::routes::{self, Destination, Params};
 use crate::store;
 use std::sync::{Arc, OnceLock};
 
@@ -24,8 +24,13 @@ pub trait SecureStorage: Send + Sync {
 #[uniffi(flat_error)]
 pub enum CoreError {
     /// The session is missing or expired: show the sign-in screen.
-    Unauthorized { message: String },
-    Failed { kind: String, message: String },
+    Unauthorized {
+        message: String,
+    },
+    Failed {
+        kind: String,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for CoreError {
@@ -55,7 +60,7 @@ impl From<crate::Error> for CoreError {
 
 type Result<T> = std::result::Result<T, CoreError>;
 
-/// A screen in the navigation catalog.
+/// A destination in the navigation catalog.
 #[derive(uniffi::Record)]
 pub struct Route {
     pub id: String,
@@ -91,10 +96,10 @@ pub fn routes() -> Vec<Route> {
         .collect()
 }
 
-/// Resolves a deep link into the stack of screens to show, root first.
+/// Resolves a deep link into the stack of destinations, root first.
 #[uniffi::export]
-pub fn open(url: String) -> Result<Vec<Screen>> {
-    routes::open(&url).map_err(|_| failed("unknown_route", format!("No screen matches {url}")))
+pub fn open(url: String) -> Result<Vec<Destination>> {
+    routes::open(&url).map_err(|_| failed("unknown_route", format!("No destination matches {url}")))
 }
 
 /// Builds the deep link for a route.
@@ -130,15 +135,15 @@ pub fn sign_out() {
     }
 }
 
-/// The conversations screen.
+/// Every conversation stored on this device, newest first.
 #[uniffi::export]
 pub fn conversations() -> Result<ConversationList> {
     Ok(conversations::list(store::current()?)?)
 }
 
-/// One conversation's screen.
+/// One conversation and its messages.
 #[uniffi::export]
-pub fn conversation(id: String) -> Result<ConversationScreen> {
+pub fn conversation(id: String) -> Result<Conversation> {
     Ok(conversations::show(store::current()?, &id)?)
 }
 
@@ -146,14 +151,14 @@ pub fn conversation(id: String) -> Result<ConversationScreen> {
 /// way. Without an `id`, starts a new conversation. Blocks, so edges call it
 /// off the main thread.
 #[uniffi::export]
-pub fn send(id: Option<String>, text: String) -> Result<ConversationScreen> {
+pub fn send(id: Option<String>, text: String) -> Result<Conversation> {
     let session = session()?;
     match conversations::send(&session, store::current()?, id.as_deref(), &text) {
-        Ok((screen, renewed)) => {
+        Ok((conversation, renewed)) => {
             if let Some(renewed) = renewed {
                 save(&renewed)?;
             }
-            Ok(screen)
+            Ok(conversation)
         }
         Err(error) if error.kind == "unauthorized" => {
             sign_out();
@@ -164,9 +169,11 @@ pub fn send(id: Option<String>, text: String) -> Result<ConversationScreen> {
 }
 
 fn session() -> Result<Session> {
-    let saved = storage()?.read(SESSION.into()).ok_or_else(|| CoreError::Unauthorized {
-        message: "Sign in with ChatGPT first".into(),
-    })?;
+    let saved = storage()?
+        .read(SESSION.into())
+        .ok_or_else(|| CoreError::Unauthorized {
+            message: "Sign in with ChatGPT first".into(),
+        })?;
     serde_json::from_str(&saved).map_err(|_| CoreError::Unauthorized {
         message: "The saved session is unreadable. Sign in again".into(),
     })

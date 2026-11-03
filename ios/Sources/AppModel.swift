@@ -2,7 +2,7 @@ import EdgesCore
 import Foundation
 import Observation
 
-/// Edge state only: which screens are on the stack and what the core returned
+/// Edge state only: which destinations are on the stack and what the core returned
 /// for them. Routing, sign-in, ChatGPT, and the database all live in the core.
 @MainActor @Observable
 final class AppModel {
@@ -10,10 +10,10 @@ final class AppModel {
 
     private(set) var signedIn = false
     private(set) var deviceCode: DeviceCode?
-    var root: Screen?
-    var path: [Screen] = []
+    var root: Destination?
+    var path: [Destination] = []
     var list: ConversationList?
-    var conversations: [String: ConversationScreen] = [:]
+    var conversations: [String: Conversation] = [:]
     var sending: String?
     var message: String?
 
@@ -34,8 +34,8 @@ final class AppModel {
         }
     }
 
-    /// The screen a row's deep link opens, for a NavigationLink to push.
-    func screen(for link: String) -> Screen? {
+    /// The destination a row's deep link opens, for a NavigationLink to push.
+    func destination(for link: String) -> Destination? {
         try? EdgesCore.open(url: link).last
     }
 
@@ -52,25 +52,25 @@ final class AppModel {
         }
     }
 
-    func load(_ screen: Screen) async {
+    func load(_ destination: Destination) async {
         await perform {
-            switch screen.route {
+            switch destination.route {
             case "conversations": list = try EdgesCore.conversations()
-            case "conversation": conversations[screen.url] = try conversation(id: screen.params["id"]!)
+            case "conversation": conversations[destination.url] = try conversation(id: destination.params["id"]!)
             default: break
             }
         }
     }
 
-    /// Sends a message; a new conversation then replaces the "new" screen with its own URL.
-    func send(_ text: String, from screen: Screen) async {
+    /// Sends a message; a new conversation then replaces the "new" destination with its own URL.
+    func send(_ text: String, from destination: Destination) async {
         sending = text
         defer { sending = nil }
         await perform {
-            let id = screen.params["id"]
+            let id = destination.params["id"]
             let reply = try await background { try EdgesCore.send(id: id, text: text) }
             conversations[reply.url] = reply
-            if screen.route == "new" { open(reply.url) }
+            if destination.route == "new" { open(reply.url) }
         }
     }
 
