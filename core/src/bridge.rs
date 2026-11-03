@@ -2,8 +2,9 @@
 //! result out. Swift calls `edges_call`, Kotlin calls `Core.call` through JNI,
 //! and the CLI calls `execute` directly.
 
+use crate::chatgpt::{self, PendingSignIn, Session};
 use crate::routes::{self, Params};
-use crate::tuist::{self, Error, PendingSignIn, Session};
+use crate::{Error, conversations, store};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::ffi::{CStr, CString, c_char};
@@ -11,37 +12,37 @@ use std::ffi::{CStr, CString, c_char};
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum Command {
+    /// Called once at app launch: opens the database in a directory the edge
+    /// may write to and runs pending migrations.
+    Launch { data_dir: String },
     /// The navigation catalog.
     Routes,
     /// Resolves a deep link into a navigation stack.
-    Open {
-        url: String,
-    },
+    Open { url: String },
     /// Builds the deep link for a route.
     Url {
         route: String,
         #[serde(default)]
         params: Params,
     },
-    SignIn {
-        redirect_uri: String,
-    },
-    CompleteSignIn {
-        pending: PendingSignIn,
-        callback_url: String,
-    },
-    Projects {
+    /// Starts signing in with ChatGPT.
+    SignIn,
+    /// Checks whether the person entered the code yet.
+    PollSignIn { pending: PendingSignIn },
+    /// The conversations screen.
+    Conversations,
+    /// One conversation's screen.
+    Conversation { id: String },
+    /// Sends a message; without an `id`, starts a new conversation.
+    Send {
         session: Session,
-    },
-    Project {
-        session: Session,
-        account: String,
-        project: String,
+        id: Option<String>,
+        text: String,
     },
 }
 
 /// Runs one command and returns `{"ok": ...}` or `{"error": {"kind", "message"}}`.
-/// Commands that talk to Tuist block, so edges call this off the main thread.
+/// Commands that talk to ChatGPT block, so edges call this off the main thread.
 pub fn execute(input: &str) -> String {
     let result = std::panic::catch_unwind(|| run(input))
         .unwrap_or_else(|_| Err(Error::new("internal", "The core failed unexpectedly")));
@@ -56,6 +57,7 @@ fn run(input: &str) -> Result<Value, Error> {
     let command: Command = serde_json::from_str(input)
         .map_err(|error| Error::new("invalid_command", error.to_string()))?;
     match command {
+        Command::Launch { data_dir } => Ok(json!({ "migrated": store::launch(&data_dir)? })),
         Command::Routes => Ok(json!({ "scheme": routes::SCHEME, "routes": routes::ROUTES })),
         Command::Open { url } => routes::open(&url)
             .map(|stack| json!({ "stack": stack }))
@@ -63,28 +65,25 @@ fn run(input: &str) -> Result<Value, Error> {
         Command::Url { route, params } => routes::url(&route, &params)
             .map(|url| json!({ "url": url }))
             .map_err(|error| Error::new("invalid_route", format!("{error:?}"))),
-        Command::SignIn { redirect_uri } => {
-            let (url, pending) = tuist::sign_in(&redirect_uri)?;
-            Ok(json!({ "authorize_url": url, "pending": pending }))
+        Command::SignIn => {
+            let pending = chatgpt::sign_in()?;
+            Ok(
+                json!({ "user_code": pending.user_code, "verification_url": chatgpt::VERIFICATION_URL, "pending": pending }),
+            )
         }
-        Command::CompleteSignIn {
-            pending,
-            callback_url,
-        } => {
-            let session = tuist::complete_sign_in(pending, &callback_url)?;
-            Ok(json!({ "session": session }))
+        Command::PollSignIn { pending } => {
+            Ok(json!({ "session": chatgpt::poll_sign_in(&pending)? }))
         }
-        Command::Projects { session } => screen(tuist::projects(&session)?),
-        Command::Project {
-            session,
-            account,
-            project,
-        } => screen(tuist::project(&session, &account, &project)?),
+        Command::Conversations => Ok(json!({ "screen": conversations::list(store::current()?)? })),
+        Command::Conversation { id } => {
+            Ok(json!({ "screen": conversations::show(store::current()?, &id)? }))
+        }
+        Command::Send { session, id, text } => {
+            let (screen, session) =
+                conversations::send(&session, store::current()?, id.as_deref(), &text)?;
+            Ok(json!({ "screen": screen, "session": session }))
+        }
     }
-}
-
-fn screen((screen, session): (Value, Option<Session>)) -> Result<Value, Error> {
-    Ok(json!({ "screen": screen, "session": session }))
 }
 
 /// # Safety
@@ -150,11 +149,11 @@ mod tests {
 
     #[test]
     fn the_c_bridge_resolves_deep_links() {
-        let result = call(r#"{"command":"open","url":"edges://projects/acme/app"}"#);
+        let result = call(r#"{"command":"open","url":"edges://conversations/ab12"}"#);
         let stack = result["ok"]["stack"].as_array().unwrap();
         assert_eq!(stack.len(), 2);
-        assert_eq!(stack[1]["route"], "project");
-        assert_eq!(stack[1]["params"]["project"], "app");
+        assert_eq!(stack[1]["route"], "conversation");
+        assert_eq!(stack[1]["params"]["id"], "ab12");
     }
 
     #[test]
@@ -179,6 +178,6 @@ mod tests {
             .iter()
             .map(|route| route["id"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(ids, ["projects", "project"]);
+        assert_eq!(ids, ["conversations", "new", "conversation"]);
     }
 }

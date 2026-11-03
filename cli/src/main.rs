@@ -1,38 +1,44 @@
 //! The terminal edge. It renders the core's screens as text and provides the
-//! terminal's platform services: a loopback server for the sign-in redirect,
-//! the system browser, and a private session file.
+//! terminal's platform services: where to keep data, and a private session file.
 
+use edges_core::chatgpt::{self, Session};
 use edges_core::routes::{self, Params};
-use edges_core::tuist::{self, Session};
+use edges_core::{conversations, store};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
 Usage: edges <command>
 
 Commands:
-  login                 Sign in with Tuist in your browser
+  login                 Sign in with ChatGPT
   logout                Forget the saved session
   routes                List every screen and its deep link pattern
   url <route> [k=v...]  Print the deep link for a screen
-  open [url]            Render the screen a deep link points to (default: edges://projects)
-  projects              Shortcut for `open edges://projects`
-  project <account/project>
-                        Shortcut for `open edges://projects/<account>/<project>`
+  open [url]            Render the screen a deep link points to (default: edges://conversations)
+  send [--to <id>] <message>
+                        Send a message; without --to, start a new conversation
+  chat [id]             Chat interactively
 
 Deep links open the same screen in the apps:
-  xcrun simctl openurl booted \"$(edges url project account=tuist project=tuist)\"
-  adb shell am start -a android.intent.action.VIEW -d \"$(edges url projects)\"";
+  xcrun simctl openurl booted \"$(edges url conversation id=<id>)\"
+  adb shell am start -a android.intent.action.VIEW -d edges://conversations";
 
 fn main() -> ExitCode {
+    if let Err(error) = store::launch(&data_dir()) {
+        eprintln!("error: {}", error.message);
+        return ExitCode::FAILURE;
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
         ["login"] => login(),
-        ["logout"] => logout(),
+        ["logout"] => std::fs::remove_file(session_path())
+            .or(Ok(()))
+            .map(|()| println!("Signed out.")),
         ["routes"] => {
             for route in routes::ROUTES {
                 println!(
@@ -46,12 +52,14 @@ fn main() -> ExitCode {
             Ok(())
         }
         ["url", route, pairs @ ..] => url(route, pairs),
-        ["open"] | ["projects"] => open("edges://projects"),
+        ["open"] => open("edges://conversations"),
         ["open", link] => open(link),
-        ["project", handle] => match handle.split_once('/') {
-            Some((account, project)) => open(&format!("edges://projects/{account}/{project}")),
-            None => Err("Pass the project as <account>/<project>".into()),
-        },
+        ["send", "--to", id, words @ ..] if !words.is_empty() => {
+            send(Some(id), &words.join(" ")).map(|_| ())
+        }
+        ["send", words @ ..] if !words.is_empty() => send(None, &words.join(" ")).map(|_| ()),
+        ["chat"] => chat(None),
+        ["chat", id] => chat(Some(id.to_string())),
         ["help" | "--help" | "-h"] => {
             println!("{USAGE}");
             Ok(())
@@ -78,127 +86,152 @@ fn url(route: &str, pairs: &[&str]) -> Result<(), String> {
             .ok_or_else(|| format!("Expected key=value, got {pair}"))?;
         params.insert(key.into(), value.into());
     }
-    let link = routes::url(route, &params).map_err(|error| format!("{error:?}"))?;
-    println!("{link}");
+    println!(
+        "{}",
+        routes::url(route, &params).map_err(|error| format!("{error:?}"))?
+    );
     Ok(())
 }
 
 fn open(link: &str) -> Result<(), String> {
     let stack = routes::open(link).map_err(|_| format!("No screen matches {link}"))?;
     let screen = stack.last().expect("a stack has at least one screen");
-    let session = load()?.ok_or("Not signed in. Run `edges login` first.")?;
+    let store = store::current().map_err(|e| e.message)?;
     let result = match screen.route {
-        "projects" => tuist::projects(&session),
-        "project" => tuist::project(
-            &session,
-            &screen.params["account"],
-            &screen.params["project"],
-        ),
-        other => return Err(format!("The terminal can't render {other} yet")),
+        "conversations" => conversations::list(store),
+        "conversation" => conversations::show(store, &screen.params["id"]),
+        "new" => return chat(None),
+        other => return Err(format!("The terminal can't render {other}")),
     };
-    let (screen, renewed) = result.map_err(|error| error.message)?;
-    if let Some(session) = renewed {
-        save(&session)?;
-    }
-    render(&screen);
+    render(&result.map_err(|e| e.message)?);
     Ok(())
 }
 
 fn render(screen: &Value) {
     println!(
-        "\x1b[1m{}\x1b[0m",
+        "\x1b[1m{}\x1b[0m\n",
         screen["title"].as_str().unwrap_or_default()
     );
-    if let Some(subtitle) = screen["subtitle"].as_str() {
-        println!("\x1b[2m{subtitle}\x1b[0m");
-    }
-    println!();
     for row in screen["rows"].as_array().into_iter().flatten() {
         println!(
-            "  {:<40} {:<8} \x1b[2m{}\x1b[0m",
-            row["id"].as_str().unwrap_or_default(),
-            row["badge"].as_str().unwrap_or_default(),
+            "  {:<40} \x1b[2m{}\x1b[0m",
+            row["title"].as_str().unwrap_or_default(),
             row["url"].as_str().unwrap_or_default()
         );
     }
-    for field in screen["fields"].as_array().into_iter().flatten() {
+    for message in screen["messages"].as_array().into_iter().flatten() {
+        print_message(message);
+    }
+}
+
+fn print_message(message: &Value) {
+    let text = message["text"].as_str().unwrap_or_default();
+    match message["role"].as_str() {
+        Some("user") => println!("\x1b[1myou\x1b[0m  {text}"),
+        Some("tool") => println!("\x1b[2m  ↳ {text}\x1b[0m"),
+        _ => println!("\x1b[35mgpt\x1b[0m  {text}"),
+    }
+}
+
+/// Sends one message and prints what came back after it.
+fn send(id: Option<&str>, text: &str) -> Result<String, String> {
+    let session = load()?.ok_or("Not signed in. Run `edges login` first.")?;
+    let store = store::current().map_err(|e| e.message)?;
+    let before = match id {
+        Some(id) => conversations::show(store, id).map_err(|e| e.message)?["messages"]
+            .as_array()
+            .map_or(0, Vec::len),
+        None => 0,
+    };
+    let (screen, renewed) =
+        conversations::send(&session, store, id, text).map_err(|e| e.message)?;
+    if let Some(session) = renewed {
+        save(&session)?;
+    }
+    for message in screen["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .skip(before + 1)
+    {
+        print_message(message);
+    }
+    let id = screen["id"].as_str().unwrap_or_default().to_string();
+    if before == 0 {
         println!(
-            "  {:<16} {}",
-            field["label"].as_str().unwrap_or_default(),
-            field["value"].as_str().unwrap_or_default()
+            "\x1b[2m  {}\x1b[0m",
+            screen["url"].as_str().unwrap_or_default()
         );
     }
-    if let Some(url) = screen["dashboard_url"].as_str() {
-        println!("\n  Dashboard: {url}");
+    Ok(id)
+}
+
+fn chat(mut id: Option<String>) -> Result<(), String> {
+    let stdin = std::io::stdin();
+    loop {
+        print!("\x1b[1myou\x1b[0m  ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        if stdin
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?
+            == 0
+        {
+            return Ok(());
+        }
+        if !line.trim().is_empty() {
+            id = Some(send(id.as_deref(), &line)?);
+        }
     }
 }
 
 fn login() -> Result<(), String> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-    let (authorize_url, pending) = tuist::sign_in(&redirect_uri).map_err(|e| e.message)?;
-
-    println!("Opening your browser to sign in with Tuist…\n{authorize_url}");
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    let _ = std::process::Command::new(opener)
-        .arg(&authorize_url)
-        .status();
-
-    for stream in listener.incoming() {
-        let mut stream = stream.map_err(|e| e.to_string())?;
-        let mut request_line = String::new();
-        BufReader::new(&stream)
-            .read_line(&mut request_line)
-            .map_err(|e| e.to_string())?;
-        let path = request_line.split_whitespace().nth(1).unwrap_or_default();
-        if !path.starts_with("/callback") {
-            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
-            continue;
+    let pending = chatgpt::sign_in().map_err(|e| e.message)?;
+    println!(
+        "To sign in with ChatGPT, open {} and enter this code:\n\n    {}\n",
+        chatgpt::VERIFICATION_URL,
+        pending.user_code
+    );
+    let deadline = Instant::now() + Duration::from_secs(15 * 60);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_secs(pending.interval));
+        match chatgpt::poll_sign_in(&pending) {
+            Ok(Some(session)) => {
+                save(&session)?;
+                println!("Signed in with ChatGPT.");
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(error) if error.kind == "network" => {}
+            Err(error) => return Err(error.message),
         }
-        let callback_url = format!("http://127.0.0.1:{port}{path}");
-        let result = tuist::complete_sign_in(pending, &callback_url);
-        let body = if result.is_ok() {
-            "Signed in. You can close this tab and return to the terminal."
-        } else {
-            "Sign-in failed. Return to the terminal for details."
-        };
-        let _ = write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let session = result.map_err(|e| e.message)?;
-        save(&session)?;
-        println!("Signed in with Tuist.");
-        return Ok(());
     }
-    Err("The browser never returned to the terminal".into())
+    Err("The code expired. Run `edges login` again.".into())
 }
 
-fn logout() -> Result<(), String> {
-    match std::fs::remove_file(session_path()?) {
-        Ok(()) => println!("Signed out."),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => println!("Not signed in."),
-        Err(error) => return Err(error.to_string()),
-    }
-    Ok(())
-}
-
-fn session_path() -> Result<PathBuf, String> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+fn home(variable: &str, fallback: &str) -> PathBuf {
+    std::env::var_os(variable)
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .ok_or("Set HOME or XDG_CONFIG_HOME")?;
-    Ok(base.join("native-edges").join("session.json"))
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(fallback)
+        })
+        .join("native-edges")
+}
+
+/// Where the terminal keeps its database.
+fn data_dir() -> String {
+    home("XDG_DATA_HOME", ".local/share")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn session_path() -> PathBuf {
+    home("XDG_CONFIG_HOME", ".config").join("session.json")
 }
 
 fn load() -> Result<Option<Session>, String> {
-    match std::fs::read(session_path()?) {
+    match std::fs::read(session_path()) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|_| "The saved session is corrupt. Run `edges login`.".into()),
@@ -209,7 +242,7 @@ fn load() -> Result<Option<Session>, String> {
 
 /// The terminal's secure storage: a file only the current user can read.
 fn save(session: &Session) -> Result<(), String> {
-    let path = session_path()?;
+    let path = session_path();
     std::fs::create_dir_all(path.parent().expect("session path has a parent"))
         .map_err(|e| e.to_string())?;
     let mut options = std::fs::OpenOptions::new();

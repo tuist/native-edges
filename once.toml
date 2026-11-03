@@ -52,12 +52,13 @@ target = "aarch64-linux-android"
 build_script_tools = ["aarch64-linux-android-clang", "clang", "llvm-ar"]
 resolver_inputs = ["Cargo.toml", "Cargo.lock", "core/Cargo.toml", "cli/Cargo.toml"]
 
-# The headless core, built once per edge.
+# The headless core, built once per edge. Diesel finds the SQL migrations it
+# compiles in relative to CARGO_MANIFEST_DIR, as it would under Cargo.
 
 [[target]]
 name = "Core"
 kind = "rust_library"
-srcs = ["core/src/**/*.rs"]
+srcs = ["core/src/**/*.rs", "core/migrations/**/*.sql"]
 deps = ["./CoreDependencies"]
 
 [target.attrs]
@@ -65,11 +66,12 @@ crate_name = "edges_core"
 crate_root = "core/src/lib.rs"
 cargo_package = "edges-core"
 edition = "2024"
+rustc_env = { CARGO_MANIFEST_DIR = "core" }
 
 [[target]]
 name = "CoreTests"
 kind = "rust_test"
-srcs = ["core/src/**/*.rs"]
+srcs = ["core/src/**/*.rs", "core/migrations/**/*.sql"]
 deps = ["./CoreDependencies"]
 
 [target.attrs]
@@ -77,12 +79,13 @@ crate_name = "edges_core"
 crate_root = "core/src/lib.rs"
 cargo_package = "edges-core"
 edition = "2024"
+rustc_env = { CARGO_MANIFEST_DIR = "core" }
 rustc_flags = ["-Dwarnings"]
 
 [[target]]
 name = "CoreIOS"
 kind = "rust_library"
-srcs = ["core/src/**/*.rs"]
+srcs = ["core/src/**/*.rs", "core/migrations/**/*.sql"]
 deps = ["./CoreIOSDependencies"]
 
 [target.attrs]
@@ -90,13 +93,14 @@ crate_name = "edges_core"
 crate_root = "core/src/lib.rs"
 cargo_package = "edges-core"
 edition = "2024"
+rustc_env = { CARGO_MANIFEST_DIR = "core" }
 target = "aarch64-apple-ios-sim"
 crate_type = "staticlib"
 
 [[target]]
 name = "CoreAndroid"
 kind = "rust_library"
-srcs = ["core/src/**/*.rs"]
+srcs = ["core/src/**/*.rs", "core/migrations/**/*.sql"]
 deps = ["./CoreAndroidDependencies"]
 
 [target.attrs]
@@ -104,6 +108,7 @@ crate_name = "edges_core"
 crate_root = "core/src/lib.rs"
 cargo_package = "edges-core"
 edition = "2024"
+rustc_env = { CARGO_MANIFEST_DIR = "core" }
 target = "aarch64-linux-android"
 crate_type = "cdylib"
 android_abi = "arm64-v8a"

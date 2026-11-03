@@ -20,18 +20,26 @@ pub struct Route {
 
 pub static ROUTES: &[Route] = &[
     Route {
-        id: "projects",
-        title: "Projects",
-        description: "The Tuist projects the signed-in user can access",
-        path: "projects",
+        id: "conversations",
+        title: "Conversations",
+        description: "Your conversations with ChatGPT, stored on this device",
+        path: "conversations",
         parent: None,
     },
+    // Declared before `conversation` so `new` isn't read as an ID.
     Route {
-        id: "project",
-        title: "Project",
-        description: "One Tuist project, identified by its account and project handles",
-        path: "projects/{account}/{project}",
-        parent: Some("projects"),
+        id: "new",
+        title: "New conversation",
+        description: "Start a conversation with ChatGPT",
+        path: "conversations/new",
+        parent: Some("conversations"),
+    },
+    Route {
+        id: "conversation",
+        title: "Conversation",
+        description: "One conversation, identified by its ID",
+        path: "conversations/{id}",
+        parent: Some("conversations"),
     },
 ];
 
@@ -147,7 +155,7 @@ fn static_name(route: &'static Route, name: &str) -> &'static str {
         .unwrap_or("param")
 }
 
-/// Tuist account and project handles: letters, digits, `-`, `_`, and `.`.
+/// Route parameters: letters, digits, `-`, `_`, and `.`.
 fn is_handle(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -170,42 +178,46 @@ mod tests {
     }
 
     #[test]
-    fn a_project_link_opens_on_top_of_the_project_list() {
-        let stack = open("edges://projects/tuist/tuist?utm=x").unwrap();
+    fn a_conversation_link_opens_on_top_of_the_list() {
+        let stack = open("edges://conversations/3f2a9c1b?utm=x").unwrap();
         assert_eq!(
             stack,
             vec![
                 Screen {
-                    route: "projects",
+                    route: "conversations",
                     params: Params::new(),
-                    url: "edges://projects".into()
+                    url: "edges://conversations".into()
                 },
                 Screen {
-                    route: "project",
-                    params: params(&[("account", "tuist"), ("project", "tuist")]),
-                    url: "edges://projects/tuist/tuist".into()
+                    route: "conversation",
+                    params: params(&[("id", "3f2a9c1b")]),
+                    url: "edges://conversations/3f2a9c1b".into()
                 },
             ]
         );
+        assert_eq!(open("edges://conversations/new").unwrap()[1].route, "new");
     }
 
     #[test]
     fn links_round_trip_through_url() {
-        let p = params(&[("account", "acme"), ("project", "ios-app")]);
-        let link = url("project", &p).unwrap();
-        assert_eq!(link, "edges://projects/acme/ios-app");
+        let p = params(&[("id", "ab12")]);
+        let link = url("conversation", &p).unwrap();
+        assert_eq!(link, "edges://conversations/ab12");
         assert_eq!(open(&link).unwrap().last().unwrap().params, p);
     }
 
     #[test]
     fn rejects_unknown_and_malformed_links() {
-        assert_eq!(open("https://tuist.dev/projects"), Err(Error::InvalidUrl));
-        assert_eq!(open("edges://settings"), Err(Error::UnknownRoute));
-        assert_eq!(open("edges://projects/tuist"), Err(Error::UnknownRoute));
-        assert_eq!(open("edges://projects/../etc"), Err(Error::UnknownRoute));
         assert_eq!(
-            url("project", &params(&[("account", "a b"), ("project", "x")])),
-            Err(Error::MissingParam("account"))
+            open("https://chatgpt.com/conversations"),
+            Err(Error::InvalidUrl)
+        );
+        assert_eq!(open("edges://settings"), Err(Error::UnknownRoute));
+        assert_eq!(open("edges://conversations/a/b"), Err(Error::UnknownRoute));
+        assert_eq!(open("edges://conversations/.."), Err(Error::UnknownRoute));
+        assert_eq!(
+            url("conversation", &params(&[("id", "a b")])),
+            Err(Error::MissingParam("id"))
         );
     }
 }
