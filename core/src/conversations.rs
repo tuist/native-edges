@@ -6,7 +6,6 @@ use crate::routes::{self, Params};
 use crate::store::{Store, schema, storage};
 use crate::{Error, Result};
 use diesel::prelude::*;
-use serde::Serialize;
 use serde_json::{Value, json};
 
 const INSTRUCTIONS: &str = "You are the assistant in Native Edges, a small sample app. \
@@ -22,13 +21,44 @@ struct Conversation {
     updated_at: i64,
 }
 
-#[derive(Queryable, Selectable, Insertable, Serialize)]
+#[derive(Queryable, Selectable, Insertable)]
 #[diesel(table_name = schema::messages)]
 struct Message {
-    #[serde(skip)]
     conversation_id: String,
     role: String,
     text: String,
+}
+
+/// The conversations screen.
+#[derive(Debug, uniffi::Record)]
+pub struct ConversationList {
+    pub title: String,
+    pub rows: Vec<ConversationRow>,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct ConversationRow {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    /// The deep link that opens the conversation.
+    pub url: String,
+}
+
+/// One conversation's screen.
+#[derive(Debug, uniffi::Record)]
+pub struct ConversationScreen {
+    pub id: String,
+    pub title: String,
+    pub messages: Vec<ChatMessage>,
+    pub url: String,
+}
+
+/// `role` is `user`, `assistant`, or `tool` (a tool ChatGPT called).
+#[derive(Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChatMessage {
+    pub role: String,
+    pub text: String,
 }
 
 #[derive(Insertable)]
@@ -38,8 +68,7 @@ struct Item {
     payload: String,
 }
 
-/// The conversations screen.
-pub fn list(store: &Store) -> Result<Value> {
+pub fn list(store: &Store) -> Result<ConversationList> {
     let connection = &mut *store.connection();
     let conversations: Vec<Conversation> = schema::conversations::table
         .order(schema::conversations::updated_at.desc())
@@ -56,18 +85,20 @@ pub fn list(store: &Store) -> Result<Value> {
             .first(connection)
             .optional()
             .map_err(db)?;
-        rows.push(json!({
-            "id": conversation.id,
-            "title": conversation.title,
-            "subtitle": reply.unwrap_or_default().chars().take(80).collect::<String>(),
-            "url": link(&conversation.id),
-        }));
+        rows.push(ConversationRow {
+            url: link(&conversation.id),
+            id: conversation.id,
+            title: conversation.title,
+            subtitle: reply.unwrap_or_default().chars().take(80).collect(),
+        });
     }
-    Ok(json!({ "title": "Conversations", "rows": rows }))
+    Ok(ConversationList {
+        title: "Conversations".into(),
+        rows,
+    })
 }
 
-/// One conversation's screen.
-pub fn show(store: &Store, id: &str) -> Result<Value> {
+pub fn show(store: &Store, id: &str) -> Result<ConversationScreen> {
     let connection = &mut *store.connection();
     let conversation = find(connection, id)?.ok_or_else(not_found)?;
     Ok(screen(&conversation, &messages(connection, id)?))
@@ -80,7 +111,7 @@ pub fn send(
     store: &Store,
     id: Option<&str>,
     text: &str,
-) -> Result<(Value, Option<Session>)> {
+) -> Result<(ConversationScreen, Option<Session>)> {
     let text = text.trim();
     if text.is_empty() {
         return Err(Error::new("invalid", "Write a message first"));
@@ -297,13 +328,19 @@ fn message(conversation_id: &str, role: &str, text: &str) -> Message {
     }
 }
 
-fn screen(conversation: &Conversation, messages: &[Message]) -> Value {
-    json!({
-        "id": conversation.id,
-        "title": conversation.title,
-        "messages": messages,
-        "url": link(&conversation.id),
-    })
+fn screen(conversation: &Conversation, messages: &[Message]) -> ConversationScreen {
+    ConversationScreen {
+        id: conversation.id.clone(),
+        title: conversation.title.clone(),
+        messages: messages
+            .iter()
+            .map(|m| ChatMessage {
+                role: m.role.clone(),
+                text: m.text.clone(),
+            })
+            .collect(),
+        url: link(&conversation.id),
+    }
 }
 
 fn link(id: &str) -> String {
@@ -354,13 +391,16 @@ mod tests {
                 .execute(connection)
                 .unwrap();
         }
-        let rows = list(&store).unwrap()["rows"].clone();
-        assert_eq!(rows[0]["id"], "bb");
-        assert_eq!(rows[1]["url"], "edges://conversations/aa");
-        assert_eq!(rows[1]["subtitle"], "Hello");
+        let rows = list(&store).unwrap().rows;
+        assert_eq!(rows[0].id, "bb");
+        assert_eq!(rows[1].url, "edges://conversations/aa");
+        assert_eq!(rows[1].subtitle, "Hello");
         assert_eq!(
-            show(&store, "aa").unwrap()["messages"][2],
-            json!({ "role": "assistant", "text": "Hello" })
+            show(&store, "aa").unwrap().messages[2],
+            ChatMessage {
+                role: "assistant".into(),
+                text: "Hello".into()
+            }
         );
         assert_eq!(
             run_tool(&store, "bb", "list_conversations", "{}"),

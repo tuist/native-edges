@@ -1,3 +1,5 @@
 /target
 /.once
 .DS_Store
+/bindgen/vendor/
+/bindgen/target/

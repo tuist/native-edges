@@ -7,14 +7,17 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,7 +28,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -34,16 +37,23 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import org.json.JSONObject
+import dev.tuist.edges.core.ChatMessage
+import dev.tuist.edges.core.Screen
 
-private val TuistPurple = Color(0xFF6F2CFF)
+private val Purple = Color(0xFF6F2CFF)
 
 class MainActivity : ComponentActivity() {
     private var model: AppModel? = null
@@ -55,22 +65,19 @@ class MainActivity : ComponentActivity() {
         setContent {
             val scope = rememberCoroutineScope()
             val model = remember {
-                AppModel(SecureStore(this), scope) { url ->
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                }.also {
+                AppModel(scope, filesDir.path, Keystore(this)).also {
                     this.model = it
-                    it.handle(link ?: AppModel.ROOT)
+                    it.open(link ?: AppModel.ROOT)
                 }
             }
-            MaterialTheme(colorScheme = lightColorScheme(primary = TuistPurple)) {
-                App(model)
-            }
+            MaterialTheme(colorScheme = lightColorScheme(primary = Purple)) { App(model) }
         }
     }
 
+    // Deep links into any screen: adb shell am start -a android.intent.action.VIEW -d edges://conversations/<id>
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        intent.data?.toString()?.let { model?.handle(it) }
+        intent.data?.toString()?.let { model?.open(it) }
     }
 }
 
@@ -80,9 +87,9 @@ private fun App(model: AppModel) {
     BackHandler(enabled = model.stack.size > 1) { model.back() }
     Surface(Modifier.fillMaxSize()) {
         when {
-            model.session == null -> SignIn(model)
+            !model.signedIn -> SignIn(model)
             screen != null -> {
-                LaunchedEffect(screen.url, model.session != null) { model.load(screen) }
+                LaunchedEffect(screen.url) { model.load(screen) }
                 ScreenView(model, screen)
             }
         }
@@ -91,6 +98,7 @@ private fun App(model: AppModel) {
 
 @Composable
 private fun SignIn(model: AppModel) {
+    val context = LocalContext.current
     Column(
         Modifier.fillMaxSize().padding(32.dp),
         verticalArrangement = Arrangement.Center,
@@ -98,23 +106,22 @@ private fun SignIn(model: AppModel) {
     ) {
         Text("Edges", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
-        Text(
-            "A headless Rust core with native edges",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Text("Chat with ChatGPT, stored on this device", color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(40.dp))
-        Button(
-            onClick = model::signIn,
-            enabled = !model.signingIn,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth().height(52.dp),
-        ) {
-            if (model.signingIn) {
-                CircularProgressIndicator(Modifier.height(20.dp), color = Color.White, strokeWidth = 2.dp)
-            } else {
-                Text("Sign in with Tuist", style = MaterialTheme.typography.titleMedium)
-            }
+        val code = model.deviceCode
+        if (code != null) {
+            Text("Enter this code at ChatGPT", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(code.userCode, style = MaterialTheme.typography.headlineMedium, fontFamily = FontFamily.Monospace)
+            TextButton(onClick = {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(code.verificationUrl)))
+            }) { Text("Open ChatGPT") }
+            CircularProgressIndicator()
+        } else {
+            Button(
+                onClick = { model.signIn() },
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) { Text("Sign in with ChatGPT", style = MaterialTheme.typography.titleMedium) }
         }
         model.message?.let {
             Spacer(Modifier.height(16.dp))
@@ -126,81 +133,94 @@ private fun SignIn(model: AppModel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ScreenView(model: AppModel, screen: Screen) {
-    val content = model.content[screen.url]
-    val loaded = (content as? Content.Loaded)?.screen
+    val title = when (screen.route) {
+        "conversations" -> model.list?.title ?: "Conversations"
+        "new" -> "New conversation"
+        else -> model.conversations[screen.url]?.title ?: ""
+    }
     Scaffold(
         topBar = {
             TopAppBar(
-                title = {
-                    Text(loaded?.optString("title") ?: if (screen.route == "projects") "Projects" else "")
-                },
+                title = { Text(title) },
                 navigationIcon = {
                     if (model.stack.size > 1) TextButton(onClick = { model.back() }) { Text("‹ Back") }
                 },
                 actions = {
-                    if (screen.route == "projects") TextButton(onClick = model::signOut) { Text("Sign out") }
+                    if (screen.route == "conversations") {
+                        TextButton(onClick = model::signOut) { Text("Sign out") }
+                        TextButton(onClick = { model.open("edges://conversations/new") }) { Text("New") }
+                    }
                 },
             )
         },
     ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
-            when (content) {
-                is Content.Loaded -> when (screen.route) {
-                    "projects" -> Projects(content.screen, model::open)
-                    else -> Project(content.screen)
-                }
-                is Content.Failed -> Text(content.message, Modifier.align(Alignment.Center).padding(24.dp))
-                else -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+        Box(Modifier.fillMaxSize().padding(padding).imePadding()) {
+            if (screen.route == "conversations") Conversations(model) else Chat(model, screen)
+            model.message?.let { Text(it, Modifier.align(Alignment.Center).padding(24.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun Conversations(model: AppModel) {
+    val rows = model.list?.rows.orEmpty()
+    if (model.list != null && rows.isEmpty()) {
+        Text("No conversations yet", Modifier.fillMaxWidth().padding(32.dp))
+    }
+    LazyColumn(Modifier.fillMaxSize()) {
+        items(rows, key = { it.id }) { row ->
+            // A tap opens the deep link the core built for the row, like any other link.
+            ListItem(
+                headlineContent = { Text(row.title, fontWeight = FontWeight.Medium) },
+                supportingContent = { Text(row.subtitle, maxLines = 2) },
+                modifier = Modifier.clickable { model.open(row.url) },
+            )
+            HorizontalDivider()
+        }
+    }
+}
+
+@Composable
+private fun Chat(model: AppModel, screen: Screen) {
+    var draft by rememberSaveable(screen.url) { mutableStateOf("") }
+    val messages = model.conversations[screen.url]?.messages.orEmpty()
+    Column(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp), reverseLayout = true) {
+            model.sending?.let { text ->
+                item { CircularProgressIndicator(Modifier.padding(12.dp)) }
+                item { Bubble(ChatMessage("user", text)) }
             }
+            items(messages.reversed()) { Bubble(it) }
         }
-    }
-}
-
-@Composable
-private fun Projects(screen: JSONObject, open: (String) -> Unit) {
-    val rows = screen.getJSONArray("rows").let { array -> (0 until array.length()).map(array::getJSONObject) }
-    LazyColumn(Modifier.fillMaxSize()) {
-        items(rows, key = { it.getString("id") }) { row ->
-            ListItem(
-                headlineContent = { Text(row.getString("title"), fontWeight = FontWeight.Medium) },
-                supportingContent = { Text(row.getString("subtitle")) },
-                trailingContent = {
-                    Text(row.getString("badge"), style = MaterialTheme.typography.labelMedium, color = TuistPurple)
-                },
-                modifier = Modifier.clickable { open(row.getString("url")) },
-            )
-            HorizontalDivider()
-        }
-    }
-}
-
-@Composable
-private fun Project(screen: JSONObject) {
-    val fields = screen.getJSONArray("fields").let { array -> (0 until array.length()).map(array::getJSONObject) }
-    val context = androidx.compose.ui.platform.LocalContext.current
-    LazyColumn(Modifier.fillMaxSize()) {
-        item {
-            Text(
-                screen.getString("subtitle"),
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            )
-        }
-        items(fields) { field ->
-            ListItem(
-                headlineContent = { Text(field.getString("value")) },
-                overlineContent = { Text(field.getString("label")) },
-            )
-            HorizontalDivider()
-        }
-        item {
-            OutlinedButton(
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(draft, { draft = it }, Modifier.weight(1f), placeholder = { Text("Message") })
+            TextButton(
                 onClick = {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(screen.getString("dashboard_url"))))
+                    model.send(draft, screen)
+                    draft = ""
                 },
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-            ) { Text("Open in Tuist") }
+                enabled = model.sending == null && draft.isNotBlank(),
+            ) { Text("Send") }
         }
+    }
+}
+
+@Composable
+private fun Bubble(message: ChatMessage) {
+    when (message.role) {
+        "user" -> Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.CenterEnd) {
+            Text(
+                message.text,
+                color = Color.White,
+                modifier = Modifier.background(Purple, RoundedCornerShape(16.dp)).padding(10.dp),
+            )
+        }
+        "tool" -> Text(
+            "🔧 ${message.text}",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(vertical = 4.dp),
+        )
+        else -> Text(message.text, Modifier.padding(vertical = 6.dp))
     }
 }

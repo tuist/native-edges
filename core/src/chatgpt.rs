@@ -2,8 +2,8 @@
 //!
 //! This is Habibi's workflow: OpenAI's device-code sign-in with the public
 //! Codex client that Pi uses (not a secret), and the Codex responses endpoint.
-//! The core never stores anything: it returns the session, and the edge keeps
-//! it in its platform's secure storage.
+//! The core never touches the Keychain or the Keystore: it hands the session to
+//! the edge's `SecureStorage`.
 
 use crate::{Error, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -17,16 +17,17 @@ const RESPONSES: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
 pub const MODEL: &str = "gpt-6.1-sol";
 
-/// What the edge keeps while the person enters the code in a browser.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PendingSignIn {
+/// What the edge shows while the person enters the code in a browser.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DeviceCode {
     pub device_auth_id: String,
     pub user_code: String,
+    pub verification_url: String,
     /// Seconds the edge waits between polls.
     pub interval: u64,
 }
 
-/// What the edge keeps in its secure storage after signing in.
+/// What the core keeps in the edge's secure storage after signing in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub access_token: String,
@@ -37,7 +38,7 @@ pub struct Session {
 }
 
 /// Starts a sign-in: the person enters `user_code` at `VERIFICATION_URL`.
-pub fn sign_in() -> Result<PendingSignIn> {
+pub fn sign_in() -> Result<DeviceCode> {
     let (status, body) = post_json(
         &format!("{AUTH}/api/accounts/deviceauth/usercode"),
         json!({ "client_id": CLIENT_ID }),
@@ -58,8 +59,9 @@ pub fn sign_in() -> Result<PendingSignIn> {
         .as_u64()
         .or_else(|| body["interval"].as_str()?.parse().ok())
         .unwrap_or(5);
-    Ok(PendingSignIn {
+    Ok(DeviceCode {
         device_auth_id: text("device_auth_id").ok_or_else(invalid)?,
+        verification_url: VERIFICATION_URL.into(),
         user_code: text("user_code")
             .or_else(|| text("usercode"))
             .ok_or_else(invalid)?,
@@ -68,7 +70,7 @@ pub fn sign_in() -> Result<PendingSignIn> {
 }
 
 /// Checks whether the person entered the code. `None` means not yet.
-pub fn poll_sign_in(pending: &PendingSignIn) -> Result<Option<Session>> {
+pub fn poll_sign_in(pending: &DeviceCode) -> Result<Option<Session>> {
     let (status, body) = post_json(
         &format!("{AUTH}/api/accounts/deviceauth/token"),
         json!({ "device_auth_id": pending.device_auth_id, "user_code": pending.user_code }),

@@ -1,0 +1,9 @@
+# How UniFFI names the generated Swift and Kotlin bindings.
+[crates.edges_core.bindings.swift]
+module_name = "EdgesCore"
+ffi_module_name = "EdgesCoreFFI"
+ffi_module_filename = "EdgesCoreFFI"
+
+[crates.edges_core.bindings.kotlin]
+package_name = "dev.tuist.edges.core"
+cdylib_name = "edges_core"

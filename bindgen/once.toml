@@ -1,0 +1,24 @@
+# UniFFI's binding generator: a host tool with its own lockfile, so its
+# command-line dependencies never reach the iOS and Android builds.
+
+[[target]]
+name = "BindgenDependencies"
+kind = "cargo_dependencies"
+
+[target.attrs]
+manifest = "Cargo.toml"
+lockfile = "Cargo.lock"
+vendor_dir = "vendor"
+resolver_inputs = ["Cargo.toml", "Cargo.lock"]
+
+[[target]]
+name = "Bindgen"
+kind = "rust_binary"
+srcs = ["src/**/*.rs"]
+deps = ["./BindgenDependencies"]
+
+[target.attrs]
+crate_name = "uniffi_bindgen"
+crate_root = "src/main.rs"
+cargo_package = "edges-bindgen"
+edition = "2024"

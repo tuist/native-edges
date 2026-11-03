@@ -10,7 +10,10 @@ ANDROID_NDK_HOME = "{{ env.ANDROID_NDK_HOME | default(value=env.HOME ~ '/Library
 
 [tasks."prepare:rust"]
 description = "Vendor the locked crates for Once's per-crate graph"
-run = "CARGO_HTTP_MULTIPLEXING=false cargo vendor --quiet --locked .once/vendor > /dev/null"
+run = [
+  "CARGO_HTTP_MULTIPLEXING=false cargo vendor --quiet --locked .once/vendor > /dev/null",
+  "CARGO_HTTP_MULTIPLEXING=false cargo vendor --quiet --locked --manifest-path bindgen/Cargo.toml bindgen/vendor > /dev/null",
+]
 
 [tasks."prepare:android"]
 description = "Verify and unpack the locked Jetpack Compose AARs, and link the toolchain pieces Once needs"

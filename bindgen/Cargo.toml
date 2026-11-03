@@ -1,0 +1,17 @@
+# UniFFI's binding generator, built from the same UniFFI version as the core.
+# A workspace of its own, so its command-line dependencies stay out of the
+# core's iOS and Android builds.
+[workspace]
+
+[package]
+name = "edges-bindgen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+uniffi = { version = "=0.32.2", default-features = false, features = ["cli"] }

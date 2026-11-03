@@ -3,7 +3,7 @@
 # (plus its own platform libraries), so the graph stays shallow and wide.
 
 [workspace]
-include = ["once.toml"]
+include = ["once.toml", "bindgen/once.toml"]
 exclude = ["**/Cargo.toml"]
 
 [modules]
@@ -52,8 +52,10 @@ target = "aarch64-linux-android"
 build_script_tools = ["aarch64-linux-android-clang", "clang", "llvm-ar"]
 resolver_inputs = ["Cargo.toml", "Cargo.lock", "core/Cargo.toml", "cli/Cargo.toml"]
 
-# The headless core, built once per edge. Diesel finds the SQL migrations it
-# compiles in relative to CARGO_MANIFEST_DIR, as it would under Cargo.
+# The headless core, built once per edge. Once doesn't set Cargo's variables,
+# so the core sets the two its macros read: Diesel finds the SQL migrations
+# relative to CARGO_MANIFEST_DIR, and UniFFI names the bindings' symbols after
+# CARGO_CRATE_NAME.
 
 [[target]]
 name = "Core"
@@ -66,7 +68,7 @@ crate_name = "edges_core"
 crate_root = "core/src/lib.rs"
 cargo_package = "edges-core"
 edition = "2024"
-rustc_env = { CARGO_MANIFEST_DIR = "core" }
+rustc_env = { CARGO_MANIFEST_DIR = "core", CARGO_CRATE_NAME = "edges_core" }
 
 [[target]]
 name = "CoreTests"
@@ -79,7 +81,7 @@ crate_name = "edges_core"
 crate_root = "core/src/lib.rs"
 cargo_package = "edges-core"
 edition = "2024"
-rustc_env = { CARGO_MANIFEST_DIR = "core" }
+rustc_env = { CARGO_MANIFEST_DIR = "core", CARGO_CRATE_NAME = "edges_core" }
 rustc_flags = ["-Dwarnings"]
 
 [[target]]
@@ -93,7 +95,7 @@ crate_name = "edges_core"
 crate_root = "core/src/lib.rs"
 cargo_package = "edges-core"
 edition = "2024"
-rustc_env = { CARGO_MANIFEST_DIR = "core" }
+rustc_env = { CARGO_MANIFEST_DIR = "core", CARGO_CRATE_NAME = "edges_core" }
 target = "aarch64-apple-ios-sim"
 crate_type = "staticlib"
 
@@ -108,14 +110,14 @@ crate_name = "edges_core"
 crate_root = "core/src/lib.rs"
 cargo_package = "edges-core"
 edition = "2024"
-rustc_env = { CARGO_MANIFEST_DIR = "core" }
+rustc_env = { CARGO_MANIFEST_DIR = "core", CARGO_CRATE_NAME = "edges_core" }
 target = "aarch64-linux-android"
 crate_type = "cdylib"
 android_abi = "arm64-v8a"
 android_api = 26
 linker_flags = ["-Wl,-z,max-page-size=16384"]
 
-# The terminal edge.
+# The terminal edge calls the core's Rust API directly.
 
 [[target]]
 name = "CLI"
@@ -130,16 +132,17 @@ cargo_package = "edges-cli"
 edition = "2024"
 rustc_flags = ["-Dwarnings"]
 
-# The SwiftUI edge.
+# The SwiftUI edge. SwiftBindings generates the core's Swift API with UniFFI
+# (modules/uniffi.star) and compiles it into the EdgesCore module.
 
 [[target]]
-name = "CoreFFI"
-kind = "apple_system_module"
+name = "SwiftBindings"
+kind = "uniffi_bindings"
+deps = ["bindgen/Bindgen", "./CoreIOS"]
 
 [target.attrs]
-modulemap = "core/include/module.modulemap"
-headers = ["core/include/edges_core.h"]
-header_dirs = ["core/include"]
+language = "swift"
+minimum_os = "18.0"
 
 [[target]]
 name = "SimulatorSDK"
@@ -152,7 +155,7 @@ sdk = "iphonesimulator"
 name = "IOS"
 kind = "apple_application"
 srcs = ["ios/Sources/**/*.swift"]
-deps = ["./CoreIOS", "./CoreFFI", "./SimulatorSDK"]
+deps = ["./CoreIOS", "./SwiftBindings", "./SimulatorSDK"]
 
 [target.attrs]
 platform = "ios"
@@ -161,13 +164,13 @@ product_name = "Edges"
 minimum_os = "18.0"
 sdk_variant = "simulator"
 families = ["iphone"]
-sdk_frameworks = ["AuthenticationServices", "Security"]
+sdk_frameworks = ["Security"]
 info_plist = "ios/Info.plist"
 entitlements = "ios/Edges.entitlements"
 asset_catalogs = ["ios/Assets.xcassets"]
 app_icon = "AppIcon"
 
-# The Jetpack Compose edge.
+# The Jetpack Compose edge. KotlinBindings generates the core's Kotlin API.
 
 [[target]]
 name = "Compose"
@@ -175,10 +178,18 @@ kind = "maven_android_libraries"
 srcs = ["android/maven.lock.json"]
 
 [[target]]
+name = "KotlinBindings"
+kind = "uniffi_bindings"
+deps = ["bindgen/Bindgen", "./CoreAndroid", "./Compose"]
+
+[target.attrs]
+language = "kotlin"
+
+[[target]]
 name = "Android"
 kind = "android_binary"
 srcs = ["android/src/**/*.kt"]
-deps = ["./CoreAndroid", "./Compose"]
+deps = ["./CoreAndroid", "./KotlinBindings", "./Compose"]
 
 [target.attrs]
 application_id = "dev.tuist.edges"

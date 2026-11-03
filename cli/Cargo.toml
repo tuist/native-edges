@@ -11,4 +11,3 @@ path = "src/main.rs"
 
 [dependencies]
 edges-core = { path = "../core" }
-serde_json = "1"

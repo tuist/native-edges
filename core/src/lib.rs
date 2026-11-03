@@ -7,10 +7,14 @@ pub mod conversations;
 pub mod routes;
 pub mod store;
 
-pub use bridge::execute;
+pub use bridge::*;
 
-/// Every failure crosses the bridge as data: a stable kind and a message to show.
-#[derive(Debug, serde::Serialize)]
+// Generates the C ABI that the Swift and Kotlin bindings call.
+uniffi::setup_scaffolding!();
+
+/// A failure inside the core: a stable kind and a message to show. The bridge
+/// turns it into `CoreError`.
+#[derive(Debug)]
 pub struct Error {
     pub kind: &'static str,
     pub message: String,

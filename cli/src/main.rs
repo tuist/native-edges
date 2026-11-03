@@ -1,13 +1,13 @@
 //! The terminal edge. It renders the core's screens as text and provides the
 //! terminal's platform services: where to keep data, and a private session file.
 
-use edges_core::chatgpt::{self, Session};
-use edges_core::routes::{self, Params};
-use edges_core::{conversations, store};
-use serde_json::Value;
+use edges_core::conversations::{ChatMessage, ConversationScreen};
+use edges_core::{CoreError, SecureStorage};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
@@ -28,26 +28,22 @@ Deep links open the same screen in the apps:
   adb shell am start -a android.intent.action.VIEW -d edges://conversations";
 
 fn main() -> ExitCode {
-    if let Err(error) = store::launch(&data_dir()) {
-        eprintln!("error: {}", error.message);
+    if let Err(error) = edges_core::launch(data_dir(), Arc::new(PrivateFiles)) {
+        eprintln!("error: {error}");
         return ExitCode::FAILURE;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
         ["login"] => login(),
-        ["logout"] => std::fs::remove_file(session_path())
-            .or(Ok(()))
-            .map(|()| println!("Signed out.")),
+        ["logout"] => {
+            edges_core::sign_out();
+            println!("Signed out.");
+            Ok(())
+        }
         ["routes"] => {
-            for route in routes::ROUTES {
-                println!(
-                    "{}\t{}://{}\t{}",
-                    route.id,
-                    routes::SCHEME,
-                    route.path,
-                    route.description
-                );
+            for route in edges_core::routes() {
+                println!("{}\t{}\t{}", route.id, route.pattern, route.description);
             }
             Ok(())
         }
@@ -71,143 +67,108 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("error: {message}");
+        Err(error) => {
+            eprintln!("error: {error}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn url(route: &str, pairs: &[&str]) -> Result<(), String> {
-    let mut params = Params::new();
+fn url(route: &str, pairs: &[&str]) -> Result<(), CoreError> {
+    let mut params = HashMap::new();
     for pair in pairs {
-        let (key, value) = pair
-            .split_once('=')
-            .ok_or_else(|| format!("Expected key=value, got {pair}"))?;
+        let (key, value) = pair.split_once('=').ok_or_else(|| CoreError::Failed {
+            kind: "invalid".into(),
+            message: format!("Expected key=value, got {pair}"),
+        })?;
         params.insert(key.into(), value.into());
     }
-    println!(
-        "{}",
-        routes::url(route, &params).map_err(|error| format!("{error:?}"))?
-    );
+    println!("{}", edges_core::url(route.into(), params)?);
     Ok(())
 }
 
-fn open(link: &str) -> Result<(), String> {
-    let stack = routes::open(link).map_err(|_| format!("No screen matches {link}"))?;
+/// Renders the screen a deep link points to, like the apps do.
+fn open(link: &str) -> Result<(), CoreError> {
+    let stack = edges_core::open(link.into())?;
     let screen = stack.last().expect("a stack has at least one screen");
-    let store = store::current().map_err(|e| e.message)?;
-    let result = match screen.route {
-        "conversations" => conversations::list(store),
-        "conversation" => conversations::show(store, &screen.params["id"]),
-        "new" => return chat(None),
-        other => return Err(format!("The terminal can't render {other}")),
-    };
-    render(&result.map_err(|e| e.message)?);
+    match screen.route.as_str() {
+        "conversations" => {
+            let list = edges_core::conversations()?;
+            println!("\x1b[1m{}\x1b[0m\n", list.title);
+            for row in list.rows {
+                println!("  {:<40} \x1b[2m{}\x1b[0m", row.title, row.url);
+            }
+        }
+        "conversation" => {
+            let conversation = edges_core::conversation(screen.params["id"].clone())?;
+            println!("\x1b[1m{}\x1b[0m\n", conversation.title);
+            conversation.messages.iter().for_each(print_message);
+        }
+        _ => return chat(None),
+    }
     Ok(())
 }
 
-fn render(screen: &Value) {
-    println!(
-        "\x1b[1m{}\x1b[0m\n",
-        screen["title"].as_str().unwrap_or_default()
-    );
-    for row in screen["rows"].as_array().into_iter().flatten() {
-        println!(
-            "  {:<40} \x1b[2m{}\x1b[0m",
-            row["title"].as_str().unwrap_or_default(),
-            row["url"].as_str().unwrap_or_default()
-        );
-    }
-    for message in screen["messages"].as_array().into_iter().flatten() {
-        print_message(message);
-    }
-}
-
-fn print_message(message: &Value) {
-    let text = message["text"].as_str().unwrap_or_default();
-    match message["role"].as_str() {
-        Some("user") => println!("\x1b[1myou\x1b[0m  {text}"),
-        Some("tool") => println!("\x1b[2m  ↳ {text}\x1b[0m"),
+fn print_message(message: &ChatMessage) {
+    let text = &message.text;
+    match message.role.as_str() {
+        "user" => println!("\x1b[1myou\x1b[0m  {text}"),
+        "tool" => println!("\x1b[2m  ↳ {text}\x1b[0m"),
         _ => println!("\x1b[35mgpt\x1b[0m  {text}"),
     }
 }
 
 /// Sends one message and prints what came back after it.
-fn send(id: Option<&str>, text: &str) -> Result<String, String> {
-    let session = load()?.ok_or("Not signed in. Run `edges login` first.")?;
-    let store = store::current().map_err(|e| e.message)?;
+fn send(id: Option<&str>, text: &str) -> Result<ConversationScreen, CoreError> {
     let before = match id {
-        Some(id) => conversations::show(store, id).map_err(|e| e.message)?["messages"]
-            .as_array()
-            .map_or(0, Vec::len),
+        Some(id) => edges_core::conversation(id.into())?.messages.len(),
         None => 0,
     };
-    let (screen, renewed) =
-        conversations::send(&session, store, id, text).map_err(|e| e.message)?;
-    if let Some(session) = renewed {
-        save(&session)?;
-    }
-    for message in screen["messages"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .skip(before + 1)
-    {
-        print_message(message);
-    }
-    let id = screen["id"].as_str().unwrap_or_default().to_string();
+    let screen = edges_core::send(id.map(str::to_string), text.into())?;
+    screen.messages.iter().skip(before + 1).for_each(print_message);
     if before == 0 {
-        println!(
-            "\x1b[2m  {}\x1b[0m",
-            screen["url"].as_str().unwrap_or_default()
-        );
+        println!("\x1b[2m  {}\x1b[0m", screen.url);
     }
-    Ok(id)
+    Ok(screen)
 }
 
-fn chat(mut id: Option<String>) -> Result<(), String> {
+fn chat(mut id: Option<String>) -> Result<(), CoreError> {
     let stdin = std::io::stdin();
     loop {
         print!("\x1b[1myou\x1b[0m  ");
         std::io::stdout().flush().ok();
         let mut line = String::new();
-        if stdin
-            .lock()
-            .read_line(&mut line)
-            .map_err(|e| e.to_string())?
-            == 0
-        {
+        if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
             return Ok(());
         }
         if !line.trim().is_empty() {
-            id = Some(send(id.as_deref(), &line)?);
+            id = Some(send(id.as_deref(), &line)?.id);
         }
     }
 }
 
-fn login() -> Result<(), String> {
-    let pending = chatgpt::sign_in().map_err(|e| e.message)?;
+fn login() -> Result<(), CoreError> {
+    let code = edges_core::sign_in()?;
     println!(
         "To sign in with ChatGPT, open {} and enter this code:\n\n    {}\n",
-        chatgpt::VERIFICATION_URL,
-        pending.user_code
+        code.verification_url, code.user_code
     );
     let deadline = Instant::now() + Duration::from_secs(15 * 60);
     while Instant::now() < deadline {
-        std::thread::sleep(Duration::from_secs(pending.interval));
-        match chatgpt::poll_sign_in(&pending) {
-            Ok(Some(session)) => {
-                save(&session)?;
+        std::thread::sleep(Duration::from_secs(code.interval));
+        match edges_core::poll_sign_in(code.clone()) {
+            Ok(true) => {
                 println!("Signed in with ChatGPT.");
                 return Ok(());
             }
-            Ok(None) => {}
-            Err(error) if error.kind == "network" => {}
-            Err(error) => return Err(error.message),
+            Ok(false) => {}
+            Err(CoreError::Failed { kind, .. }) if kind == "network" => {}
+            Err(error) => return Err(error),
         }
     }
-    Err("The code expired. Run `edges login` again.".into())
+    Err(CoreError::Unauthorized {
+        message: "The code expired. Run `edges login` again.".into(),
+    })
 }
 
 fn home(variable: &str, fallback: &str) -> PathBuf {
@@ -226,30 +187,33 @@ fn data_dir() -> String {
         .into_owned()
 }
 
-fn session_path() -> PathBuf {
-    home("XDG_CONFIG_HOME", ".config").join("session.json")
-}
+/// The terminal's secure storage: files only the current user can read.
+struct PrivateFiles;
 
-fn load() -> Result<Option<Session>, String> {
-    match std::fs::read(session_path()) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| "The saved session is corrupt. Run `edges login`.".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.to_string()),
+impl PrivateFiles {
+    fn path(key: &str) -> PathBuf {
+        home("XDG_CONFIG_HOME", ".config").join(format!("{key}.json"))
     }
 }
 
-/// The terminal's secure storage: a file only the current user can read.
-fn save(session: &Session) -> Result<(), String> {
-    let path = session_path();
-    std::fs::create_dir_all(path.parent().expect("session path has a parent"))
-        .map_err(|e| e.to_string())?;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(&path).map_err(|e| e.to_string())?;
-    file.write_all(&serde_json::to_vec(session).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+impl SecureStorage for PrivateFiles {
+    fn read(&self, key: String) -> Option<String> {
+        std::fs::read_to_string(Self::path(&key)).ok()
+    }
+
+    fn write(&self, key: String, value: String) {
+        let path = Self::path(&key);
+        let _ = std::fs::create_dir_all(path.parent().expect("the path has a parent"));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        if let Ok(mut file) = options.open(&path) {
+            let _ = file.write_all(value.as_bytes());
+        }
+    }
+
+    fn delete(&self, key: String) {
+        let _ = std::fs::remove_file(Self::path(&key));
+    }
 }

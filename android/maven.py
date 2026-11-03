@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Lock and materialize Jetpack Compose from Google Maven without Gradle.
+"""Lock and materialize Jetpack Compose and JNA from Maven without Gradle.
 
 Once builds the APK; it does not import Maven artifacts. This script resolves
 the roots below through Gradle module metadata (falling back to POMs), pins the
@@ -30,7 +30,11 @@ ROOTS = {
     # Keep the Compose libraries on one release.
     "androidx.compose.foundation:foundation": "1.9.2",
     "androidx.compose.ui:ui": "1.9.2",
+    # The UniFFI Kotlin bindings call the core through JNA.
+    "net.java.dev.jna:jna": "5.19.1",
 }
+# Published as a JAR for the JVM and as an AAR that carries Android's libjnidispatch.so.
+AARS = {"net.java.dev.jna:jna"}
 ROOT = Path(__file__).resolve().parents[1]
 LOCK = Path(__file__).with_name("maven.lock.json")
 VENDOR = ROOT / ".once/vendor-maven"
@@ -120,7 +124,8 @@ def describe(coordinate, version):
             dependencies.append((name, text("version").strip("[]")))
     if packaging == "pom":
         return None, None, None, dependencies, []
-    return None, None, f"{artifact}-{version}.{'aar' if packaging == 'aar' else 'jar'}", dependencies, []
+    extension = "aar" if packaging == "aar" or coordinate in AARS else "jar"
+    return None, None, f"{artifact}-{version}.{extension}", dependencies, []
 
 
 def lock():

@@ -1,4 +1,4 @@
-import AuthenticationServices
+import EdgesCore
 import SwiftUI
 
 @main
@@ -9,9 +9,9 @@ struct EdgesApp: App {
         WindowGroup {
             RootView(model: model)
                 .tint(Color(red: 0.435, green: 0.173, blue: 1))
-                .task { if model.root == nil { await model.open(AppModel.root) } }
-                // Deep links into any screen: xcrun simctl openurl booted edges://projects/tuist/tuist
-                .onOpenURL { url in Task { await model.open(url.absoluteString) } }
+                .task { if model.root == nil { model.open(AppModel.root) } }
+                // Deep links into any screen: xcrun simctl openurl booted edges://conversations/<id>
+                .onOpenURL { url in model.open(url.absoluteString) }
         }
     }
 }
@@ -20,7 +20,7 @@ struct RootView: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        if model.session == nil {
+        if !model.signedIn {
             SignInView(model: model)
         } else if let root = model.root {
             NavigationStack(path: $model.path) {
@@ -33,25 +33,26 @@ struct RootView: View {
 
 struct SignInView: View {
     let model: AppModel
-    @Environment(\.webAuthenticationSession) private var webAuthentication
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             Spacer()
             Text("Edges").font(.largeTitle.bold())
-            Text("A headless Rust core with native edges").foregroundStyle(.secondary)
+            Text("Chat with ChatGPT, stored on this device").foregroundStyle(.secondary)
             Spacer()
-            Button {
-                Task { await model.signIn(with: webAuthentication) }
-            } label: {
-                Group {
-                    if model.signingIn { ProgressView().tint(.white) } else { Text("Sign in with Tuist") }
+            if let code = model.deviceCode {
+                Text("Enter this code at ChatGPT").foregroundStyle(.secondary)
+                Text(code.userCode).font(.title.monospaced().bold()).textSelection(.enabled)
+                Link("Open ChatGPT", destination: URL(string: code.verificationUrl)!).font(.headline)
+                ProgressView()
+            } else {
+                Button {
+                    Task { await model.signIn() }
+                } label: {
+                    Text("Sign in with ChatGPT").font(.headline).frame(maxWidth: .infinity, minHeight: 34)
                 }
-                .font(.headline)
-                .frame(maxWidth: .infinity, minHeight: 34)
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(model.signingIn)
             if let message = model.message {
                 Text(message).font(.footnote).foregroundStyle(.red)
             }
@@ -66,61 +67,102 @@ struct ScreenView: View {
 
     var body: some View {
         Group {
-            switch model.content[screen.url] {
-            case let .loaded(content) where screen.route == "projects": ProjectsView(model: model, content: content)
-            case let .loaded(content): ProjectView(content: content)
-            case let .failed(message): ContentUnavailableView(message, systemImage: "exclamationmark.triangle")
-            default: ProgressView()
+            if screen.route == "conversations" {
+                ConversationsView(model: model)
+            } else {
+                ChatView(model: model, screen: screen)
             }
         }
         .navigationTitle(title)
-        .toolbar {
-            if screen.route == "projects" { Button("Sign out", action: model.signOut) }
-        }
         .task(id: screen) { await model.load(screen) }
-        .refreshable { await model.load(screen, refresh: true) }
     }
 
     private var title: String {
-        if case let .loaded(content) = model.content[screen.url] { return content["title"] as? String ?? "" }
-        return screen.route == "projects" ? "Projects" : screen.params["project"] ?? ""
-    }
-}
-
-struct ProjectsView: View {
-    let model: AppModel
-    let content: [String: Any]
-
-    var body: some View {
-        List(content["rows"] as? [[String: String]] ?? [], id: \.["id"]) { row in
-            // A tap opens the deep link the core built for the row, like any other link.
-            Button {
-                Task { await model.open(row["url"] ?? "") }
-            } label: {
-                LabeledContent {
-                    Text(row["badge"] ?? "").font(.caption)
-                } label: {
-                    Text(row["title"] ?? "").foregroundStyle(.primary)
-                    Text(row["subtitle"] ?? "")
-                }
-            }
+        switch screen.route {
+        case "conversations": model.list?.title ?? "Conversations"
+        case "new": "New conversation"
+        default: model.conversations[screen.url]?.title ?? ""
         }
     }
 }
 
-struct ProjectView: View {
-    let content: [String: Any]
+struct ConversationsView: View {
+    let model: AppModel
 
     var body: some View {
-        List {
-            Section(content["subtitle"] as? String ?? "") {
-                ForEach(content["fields"] as? [[String: String]] ?? [], id: \.["label"]) { field in
-                    LabeledContent(field["label"] ?? "", value: field["value"] ?? "")
+        let rows = model.list?.rows ?? []
+        List(rows, id: \.id) { row in
+            // A tap opens the deep link the core built for the row, like any other link.
+            Button {
+                model.open(row.url)
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(row.title).foregroundStyle(.primary)
+                    Text(row.subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
                 }
             }
-            if let url = (content["dashboard_url"] as? String).flatMap(URL.init(string:)) {
-                Link("Open in Tuist", destination: url)
+        }
+        .overlay {
+            if model.list != nil, rows.isEmpty {
+                ContentUnavailableView("No conversations yet", systemImage: "bubble.left.and.bubble.right")
             }
+        }
+        .toolbar {
+            Button("Sign out", action: model.signOut)
+            Button("New", systemImage: "square.and.pencil") { model.open("edges://conversations/new") }
+        }
+    }
+}
+
+struct ChatView: View {
+    let model: AppModel
+    let screen: Screen
+    @State private var draft = ""
+
+    var body: some View {
+        let messages = model.conversations[screen.url]?.messages ?? []
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                ForEach(messages.indices, id: \.self) { index in
+                    Bubble(message: messages[index])
+                }
+                if let sending = model.sending {
+                    Bubble(message: ChatMessage(role: "user", text: sending))
+                    ProgressView().padding()
+                }
+            }
+            .padding()
+        }
+        .defaultScrollAnchor(.bottom)
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                TextField("Message", text: $draft, axis: .vertical).textFieldStyle(.roundedBorder)
+                Button("Send", systemImage: "arrow.up.circle.fill") {
+                    let text = draft
+                    draft = ""
+                    Task { await model.send(text, from: screen) }
+                }
+                .labelStyle(.iconOnly).font(.title)
+                .disabled(model.sending != nil || draft.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding()
+            .background(.bar)
+        }
+    }
+}
+
+struct Bubble: View {
+    let message: ChatMessage
+
+    var body: some View {
+        switch message.role {
+        case "user":
+            Text(message.text).padding(10).background(.tint, in: .rect(cornerRadius: 16)).foregroundStyle(.white)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        case "tool":
+            Label(message.text, systemImage: "wrench.and.screwdriver").font(.caption).foregroundStyle(.secondary)
+        default:
+            Text(LocalizedStringKey(message.text)).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

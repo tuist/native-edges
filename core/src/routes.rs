@@ -2,7 +2,7 @@
 //! CLI, and agents can discover them, and every screen has a URL that opens it.
 
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 pub const SCHEME: &str = "edges";
 
@@ -43,12 +43,12 @@ pub static ROUTES: &[Route] = &[
     },
 ];
 
-pub type Params = BTreeMap<String, String>;
+pub type Params = HashMap<String, String>;
 
 /// One entry in a navigation stack.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Screen {
-    pub route: &'static str,
+    pub route: String,
     pub params: Params,
     pub url: String,
 }
@@ -106,7 +106,7 @@ fn stack(route: &'static Route, params: Params) -> Result<Vec<Screen>, Error> {
             .filter_map(|name| params.get(name).map(|v| (name.to_string(), v.clone())))
             .collect();
         screens.push(Screen {
-            route: route.id,
+            route: route.id.into(),
             url: url(route.id, &own)?,
             params: own,
         });
@@ -184,12 +184,12 @@ mod tests {
             stack,
             vec![
                 Screen {
-                    route: "conversations",
+                    route: "conversations".into(),
                     params: Params::new(),
                     url: "edges://conversations".into()
                 },
                 Screen {
-                    route: "conversation",
+                    route: "conversation".into(),
                     params: params(&[("id", "3f2a9c1b")]),
                     url: "edges://conversations/3f2a9c1b".into()
                 },

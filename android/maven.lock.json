@@ -3,7 +3,8 @@
     "androidx.activity:activity-compose": "1.12.4",
     "androidx.compose.material3:material3": "1.4.0",
     "androidx.compose.foundation:foundation": "1.9.2",
-    "androidx.compose.ui:ui": "1.9.2"
+    "androidx.compose.ui:ui": "1.9.2",
+    "net.java.dev.jna:jna": "5.19.1"
   },
   "artifacts": [
     {
@@ -376,6 +377,13 @@
       "url": "https://repo.maven.apache.org/maven2/com/google/guava/listenablefuture/1.0/listenablefuture-1.0.jar",
       "packaging": "jar",
       "sha256": "e4ad7607e5c0477c6f890ef26a49cb8d1bb4dffb650bab4502afee64644e3069"
+    },
+    {
+      "coordinate": "net.java.dev.jna:jna",
+      "version": "5.19.1",
+      "url": "https://repo.maven.apache.org/maven2/net/java/dev/jna/jna/5.19.1/jna-5.19.1.aar",
+      "packaging": "aar",
+      "sha256": "b57125cb7d16253f0d65a80f7d3a4c3664effa711b8bdbb7f87fb572ce1624ed"
     },
     {
       "coordinate": "org.jetbrains.kotlinx:kotlinx-coroutines-android",

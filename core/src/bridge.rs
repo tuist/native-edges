@@ -1,183 +1,248 @@
-//! The one bridge between the edges and the core: a JSON command in, a JSON
-//! result out. Swift calls `edges_call`, Kotlin calls `Core.call` through JNI,
-//! and the CLI calls `execute` directly.
+//! The one bridge between the edges and the core. UniFFI turns these
+//! annotations into Swift and Kotlin bindings, so the apps call typed
+//! functions and get records back. The CLI calls the same functions in Rust.
 
-use crate::chatgpt::{self, PendingSignIn, Session};
-use crate::routes::{self, Params};
-use crate::{Error, conversations, store};
-use serde::Deserialize;
-use serde_json::{Value, json};
-use std::ffi::{CStr, CString, c_char};
+use crate::chatgpt::{self, DeviceCode, Session};
+use crate::conversations::{self, ConversationList, ConversationScreen};
+use crate::routes::{self, Params, Screen};
+use crate::store;
+use std::sync::{Arc, OnceLock};
 
-#[derive(Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case")]
-enum Command {
-    /// Called once at app launch: opens the database in a directory the edge
-    /// may write to and runs pending migrations.
-    Launch { data_dir: String },
-    /// The navigation catalog.
-    Routes,
-    /// Resolves a deep link into a navigation stack.
-    Open { url: String },
-    /// Builds the deep link for a route.
-    Url {
-        route: String,
-        #[serde(default)]
-        params: Params,
-    },
-    /// Starts signing in with ChatGPT.
-    SignIn,
-    /// Checks whether the person entered the code yet.
-    PollSignIn { pending: PendingSignIn },
-    /// The conversations screen.
-    Conversations,
-    /// One conversation's screen.
-    Conversation { id: String },
-    /// Sends a message; without an `id`, starts a new conversation.
-    Send {
-        session: Session,
-        id: Option<String>,
-        text: String,
-    },
+/// A platform service the edge provides: the Keychain on iOS, the Keystore on
+/// Android, a private file in the terminal. The core decides what to keep;
+/// the edge decides how to keep it safe.
+#[uniffi::export(with_foreign)]
+pub trait SecureStorage: Send + Sync {
+    fn read(&self, key: String) -> Option<String>;
+    fn write(&self, key: String, value: String);
+    fn delete(&self, key: String);
 }
 
-/// Runs one command and returns `{"ok": ...}` or `{"error": {"kind", "message"}}`.
-/// Commands that talk to ChatGPT block, so edges call this off the main thread.
-pub fn execute(input: &str) -> String {
-    let result = std::panic::catch_unwind(|| run(input))
-        .unwrap_or_else(|_| Err(Error::new("internal", "The core failed unexpectedly")));
-    match result {
-        Ok(value) => json!({ "ok": value }),
-        Err(error) => json!({ "error": error }),
-    }
-    .to_string()
+/// Every failure crosses the bridge as a typed error. Swift and Kotlin see the
+/// variant and its message; Rust callers can also match on `kind`.
+#[derive(Debug, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum CoreError {
+    /// The session is missing or expired: show the sign-in screen.
+    Unauthorized { message: String },
+    Failed { kind: String, message: String },
 }
 
-fn run(input: &str) -> Result<Value, Error> {
-    let command: Command = serde_json::from_str(input)
-        .map_err(|error| Error::new("invalid_command", error.to_string()))?;
-    match command {
-        Command::Launch { data_dir } => Ok(json!({ "migrated": store::launch(&data_dir)? })),
-        Command::Routes => Ok(json!({ "scheme": routes::SCHEME, "routes": routes::ROUTES })),
-        Command::Open { url } => routes::open(&url)
-            .map(|stack| json!({ "stack": stack }))
-            .map_err(|_| Error::new("unknown_route", format!("No screen matches {url}"))),
-        Command::Url { route, params } => routes::url(&route, &params)
-            .map(|url| json!({ "url": url }))
-            .map_err(|error| Error::new("invalid_route", format!("{error:?}"))),
-        Command::SignIn => {
-            let pending = chatgpt::sign_in()?;
-            Ok(
-                json!({ "user_code": pending.user_code, "verification_url": chatgpt::VERIFICATION_URL, "pending": pending }),
-            )
-        }
-        Command::PollSignIn { pending } => {
-            Ok(json!({ "session": chatgpt::poll_sign_in(&pending)? }))
-        }
-        Command::Conversations => Ok(json!({ "screen": conversations::list(store::current()?)? })),
-        Command::Conversation { id } => {
-            Ok(json!({ "screen": conversations::show(store::current()?, &id)? }))
-        }
-        Command::Send { session, id, text } => {
-            let (screen, session) =
-                conversations::send(&session, store::current()?, id.as_deref(), &text)?;
-            Ok(json!({ "screen": screen, "session": session }))
+impl std::fmt::Display for CoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unauthorized { message } | Self::Failed { message, .. } => f.write_str(message),
         }
     }
 }
 
-/// # Safety
-/// `input` must be a NUL-terminated UTF-8 string that stays alive for the call.
-/// Release the result exactly once with `edges_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn edges_call(input: *const c_char) -> *mut c_char {
-    let output = if input.is_null() {
-        json!({"error": Error::new("invalid_command", "No input")}).to_string()
-    } else {
-        // SAFETY: the caller guarantees a live C string.
-        match unsafe { CStr::from_ptr(input) }.to_str() {
-            Ok(input) => execute(input),
-            Err(_) => {
-                json!({"error": Error::new("invalid_command", "Input is not UTF-8")}).to_string()
+impl std::error::Error for CoreError {}
+
+impl From<crate::Error> for CoreError {
+    fn from(error: crate::Error) -> Self {
+        if error.kind == "unauthorized" {
+            Self::Unauthorized {
+                message: error.message,
+            }
+        } else {
+            Self::Failed {
+                kind: error.kind.into(),
+                message: error.message,
             }
         }
-    };
-    CString::new(output)
-        .expect("JSON never contains NUL bytes")
-        .into_raw()
-}
-
-/// # Safety
-/// Pass a pointer returned by `edges_call` exactly once, or null.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn edges_free(output: *mut c_char) {
-    if !output.is_null() {
-        // SAFETY: the pointer came from CString::into_raw in edges_call.
-        drop(unsafe { CString::from_raw(output) });
     }
 }
 
-#[cfg(target_os = "android")]
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_tuist_edges_Core_call(
-    mut env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-    input: jni::objects::JString,
-) -> jni::sys::jstring {
-    let output = match env.get_string(&input) {
-        Ok(input) => execute(&String::from(input)),
-        Err(_) => return std::ptr::null_mut(),
-    };
-    env.new_string(output)
-        .map_or(std::ptr::null_mut(), |value| value.into_raw())
+type Result<T> = std::result::Result<T, CoreError>;
+
+/// A screen in the navigation catalog.
+#[derive(uniffi::Record)]
+pub struct Route {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    /// For example `edges://conversations/{id}`.
+    pub pattern: String,
+}
+
+const SESSION: &str = "chatgpt_session";
+static STORAGE: OnceLock<Arc<dyn SecureStorage>> = OnceLock::new();
+
+/// Called once at launch: opens the database in a directory the edge may
+/// write to, runs pending migrations, and keeps the edge's secure storage.
+/// Returns the migrations it applied.
+#[uniffi::export]
+pub fn launch(data_dir: String, storage: Arc<dyn SecureStorage>) -> Result<Vec<String>> {
+    let _ = STORAGE.set(storage);
+    Ok(store::launch(&data_dir)?)
+}
+
+/// The navigation catalog.
+#[uniffi::export]
+pub fn routes() -> Vec<Route> {
+    routes::ROUTES
+        .iter()
+        .map(|route| Route {
+            id: route.id.into(),
+            title: route.title.into(),
+            description: route.description.into(),
+            pattern: format!("{}://{}", routes::SCHEME, route.path),
+        })
+        .collect()
+}
+
+/// Resolves a deep link into the stack of screens to show, root first.
+#[uniffi::export]
+pub fn open(url: String) -> Result<Vec<Screen>> {
+    routes::open(&url).map_err(|_| failed("unknown_route", format!("No screen matches {url}")))
+}
+
+/// Builds the deep link for a route.
+#[uniffi::export]
+pub fn url(route: String, params: Params) -> Result<String> {
+    routes::url(&route, &params).map_err(|error| failed("invalid_route", format!("{error:?}")))
+}
+
+#[uniffi::export]
+pub fn is_signed_in() -> bool {
+    storage().is_ok_and(|storage| storage.read(SESSION.into()).is_some())
+}
+
+/// Starts signing in with ChatGPT: show `user_code` and poll until it's entered.
+#[uniffi::export]
+pub fn sign_in() -> Result<DeviceCode> {
+    Ok(chatgpt::sign_in()?)
+}
+
+/// Returns true once the person entered the code, after saving the session.
+#[uniffi::export]
+pub fn poll_sign_in(code: DeviceCode) -> Result<bool> {
+    match chatgpt::poll_sign_in(&code)? {
+        Some(session) => save(&session).map(|()| true),
+        None => Ok(false),
+    }
+}
+
+#[uniffi::export]
+pub fn sign_out() {
+    if let Ok(storage) = storage() {
+        storage.delete(SESSION.into());
+    }
+}
+
+/// The conversations screen.
+#[uniffi::export]
+pub fn conversations() -> Result<ConversationList> {
+    Ok(conversations::list(store::current()?)?)
+}
+
+/// One conversation's screen.
+#[uniffi::export]
+pub fn conversation(id: String) -> Result<ConversationScreen> {
+    Ok(conversations::show(store::current()?, &id)?)
+}
+
+/// Sends a message and waits for ChatGPT to answer, calling tools along the
+/// way. Without an `id`, starts a new conversation. Blocks, so edges call it
+/// off the main thread.
+#[uniffi::export]
+pub fn send(id: Option<String>, text: String) -> Result<ConversationScreen> {
+    let session = session()?;
+    match conversations::send(&session, store::current()?, id.as_deref(), &text) {
+        Ok((screen, renewed)) => {
+            if let Some(renewed) = renewed {
+                save(&renewed)?;
+            }
+            Ok(screen)
+        }
+        Err(error) if error.kind == "unauthorized" => {
+            sign_out();
+            Err(error.into())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn session() -> Result<Session> {
+    let saved = storage()?.read(SESSION.into()).ok_or_else(|| CoreError::Unauthorized {
+        message: "Sign in with ChatGPT first".into(),
+    })?;
+    serde_json::from_str(&saved).map_err(|_| CoreError::Unauthorized {
+        message: "The saved session is unreadable. Sign in again".into(),
+    })
+}
+
+fn save(session: &Session) -> Result<()> {
+    let json = serde_json::to_string(session).map_err(|e| failed("internal", e.to_string()))?;
+    storage()?.write(SESSION.into(), json);
+    Ok(())
+}
+
+fn storage() -> Result<&'static Arc<dyn SecureStorage>> {
+    STORAGE
+        .get()
+        .ok_or_else(|| failed("not_launched", "Call `launch` first".into()))
+}
+
+fn failed(kind: &str, message: String) -> CoreError {
+    CoreError::Failed {
+        kind: kind.into(),
+        message,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
-    fn call(input: &str) -> Value {
-        let input = CString::new(input).unwrap();
-        // SAFETY: the input is a live C string and the output is freed once.
-        unsafe {
-            let output = edges_call(input.as_ptr());
-            let value = serde_json::from_str(CStr::from_ptr(output).to_str().unwrap()).unwrap();
-            edges_free(output);
-            value
+    #[derive(Default)]
+    struct Memory(Mutex<HashMap<String, String>>);
+
+    impl SecureStorage for Memory {
+        fn read(&self, key: String) -> Option<String> {
+            self.0.lock().unwrap().get(&key).cloned()
+        }
+        fn write(&self, key: String, value: String) {
+            self.0.lock().unwrap().insert(key, value);
+        }
+        fn delete(&self, key: String) {
+            self.0.lock().unwrap().remove(&key);
         }
     }
 
     #[test]
-    fn the_c_bridge_resolves_deep_links() {
-        let result = call(r#"{"command":"open","url":"edges://conversations/ab12"}"#);
-        let stack = result["ok"]["stack"].as_array().unwrap();
-        assert_eq!(stack.len(), 2);
-        assert_eq!(stack[1]["route"], "conversation");
-        assert_eq!(stack[1]["params"]["id"], "ab12");
+    fn the_session_lives_in_the_edges_storage() {
+        let dir = std::env::temp_dir().join(format!("edges-bridge-{}", std::process::id()));
+        launch(dir.to_string_lossy().into(), Arc::new(Memory::default())).unwrap();
+        assert!(!is_signed_in());
+        assert!(matches!(
+            send(None, "Hi".into()),
+            Err(CoreError::Unauthorized { .. })
+        ));
+        save(&Session {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            account_id: "acc".into(),
+            expires_at: 0,
+        })
+        .unwrap();
+        assert!(is_signed_in());
+        sign_out();
+        assert!(!is_signed_in());
     }
 
     #[test]
-    fn the_c_bridge_reports_errors_as_data() {
-        assert_eq!(
-            call(r#"{"command":"open","url":"edges://nope"}"#)["error"]["kind"],
-            "unknown_route"
-        );
-        assert_eq!(
-            call(r#"{"command":"teleport"}"#)["error"]["kind"],
-            "invalid_command"
-        );
-        assert_eq!(call("not json")["error"]["kind"], "invalid_command");
-    }
-
-    #[test]
-    fn the_catalog_lists_every_route() {
-        let result = call(r#"{"command":"routes"}"#);
-        let ids: Vec<_> = result["ok"]["routes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|route| route["id"].as_str().unwrap().to_string())
-            .collect();
+    fn deep_links_and_the_catalog_cross_the_bridge() {
+        let stack = open("edges://conversations/ab12".into()).unwrap();
+        assert_eq!(stack[1].route, "conversation");
+        assert_eq!(stack[1].params["id"], "ab12");
+        assert!(matches!(
+            open("edges://nope".into()),
+            Err(CoreError::Failed { kind, .. }) if kind == "unknown_route"
+        ));
+        let ids: Vec<_> = routes().into_iter().map(|route| route.id).collect();
         assert_eq!(ids, ["conversations", "new", "conversation"]);
     }
 }

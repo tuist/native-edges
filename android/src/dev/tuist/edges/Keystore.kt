@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import dev.tuist.edges.core.SecureStorage
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -11,14 +12,15 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * The Android edge's platform service for secrets: the session the core
- * returns is encrypted with a key that never leaves the Android Keystore.
+ * The Android edge's secure storage. The core decides what to keep (the
+ * ChatGPT session); values are encrypted with a key that never leaves the
+ * Android Keystore. UniFFI generated the interface.
  */
-class SecureStore(context: Context) {
-    private val preferences = context.getSharedPreferences("session", Context.MODE_PRIVATE)
+class Keystore(context: Context) : SecureStorage {
+    private val preferences = context.getSharedPreferences("secure", Context.MODE_PRIVATE)
 
-    fun read(): String? {
-        val stored = preferences.getString(KEY, null) ?: return null
+    override fun read(key: String): String? {
+        val stored = preferences.getString(key, null) ?: return null
         return runCatching {
             val bytes = Base64.decode(stored, Base64.NO_WRAP)
             val cipher = Cipher.getInstance(TRANSFORMATION)
@@ -27,15 +29,15 @@ class SecureStore(context: Context) {
         }.getOrNull()
     }
 
-    fun write(value: String) {
+    override fun write(key: String, value: String) {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val sealed = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-        preferences.edit().putString(KEY, Base64.encodeToString(sealed, Base64.NO_WRAP)).apply()
+        preferences.edit().putString(key, Base64.encodeToString(sealed, Base64.NO_WRAP)).apply()
     }
 
-    fun clear() {
-        preferences.edit().remove(KEY).apply()
+    override fun delete(key: String) {
+        preferences.edit().remove(key).apply()
     }
 
     private fun key(): SecretKey {
@@ -53,7 +55,6 @@ class SecureStore(context: Context) {
 
     private companion object {
         const val ALIAS = "edges-session"
-        const val KEY = "session"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val IV_BYTES = 12
     }
