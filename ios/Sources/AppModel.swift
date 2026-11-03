@@ -34,6 +34,11 @@ final class AppModel {
         }
     }
 
+    /// The screen a row's deep link opens, for a NavigationLink to push.
+    func screen(for link: String) -> Screen? {
+        try? EdgesCore.open(url: link).last
+    }
+
     /// Shows a code, then polls until the person enters it at ChatGPT.
     func signIn() async {
         await perform {

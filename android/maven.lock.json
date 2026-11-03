@@ -4,6 +4,7 @@
     "androidx.compose.material3:material3": "1.4.0",
     "androidx.compose.foundation:foundation": "1.9.2",
     "androidx.compose.ui:ui": "1.9.2",
+    "androidx.compose.material:material-icons-core": "1.7.8",
     "net.java.dev.jna:jna": "5.19.1"
   },
   "artifacts": [
@@ -111,6 +112,13 @@
       "url": "https://dl.google.com/dl/android/maven2/androidx/compose/material3/material3-android/1.4.0/material3-android-1.4.0.aar",
       "packaging": "aar",
       "sha256": "3a37e8b36df3822fe1e6059f0f9fafda8800388860477624ac1b9422c418a36e"
+    },
+    {
+      "coordinate": "androidx.compose.material:material-icons-core-android",
+      "version": "1.7.8",
+      "url": "https://dl.google.com/dl/android/maven2/androidx/compose/material/material-icons-core-android/1.7.8/material-icons-core-android-1.7.8.aar",
+      "packaging": "aar",
+      "sha256": "332c06b25e662cc417fb087e76b8faa5cb249f4992ffa3360084a3d4ab882284"
     },
     {
       "coordinate": "androidx.compose.material:material-ripple-android",

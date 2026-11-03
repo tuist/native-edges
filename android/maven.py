@@ -30,6 +30,7 @@ ROOTS = {
     # Keep the Compose libraries on one release.
     "androidx.compose.foundation:foundation": "1.9.2",
     "androidx.compose.ui:ui": "1.9.2",
+    "androidx.compose.material:material-icons-core": "1.7.8",
     # The UniFFI Kotlin bindings call the core through JNA.
     "net.java.dev.jna:jna": "5.19.1",
 }

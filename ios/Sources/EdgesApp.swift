@@ -35,29 +35,52 @@ struct SignInView: View {
     let model: AppModel
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 24) {
             Spacer()
-            Text("Edges").font(.largeTitle.bold())
-            Text("Chat with ChatGPT, stored on this device").foregroundStyle(.secondary)
+            Image(systemName: "bubble.left.and.text.bubble.right.fill")
+                .font(.system(size: 64))
+                .foregroundStyle(.tint)
+            VStack(spacing: 8) {
+                Text("Edges").font(.largeTitle.bold())
+                Text("Chat with ChatGPT. Conversations stay on this iPhone.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             if let code = model.deviceCode {
-                Text("Enter this code at ChatGPT").foregroundStyle(.secondary)
-                Text(code.userCode).font(.title.monospaced().bold()).textSelection(.enabled)
-                Link("Open ChatGPT", destination: URL(string: code.verificationUrl)!).font(.headline)
-                ProgressView()
+                VStack(spacing: 12) {
+                    Text("Enter this code at ChatGPT").font(.subheadline).foregroundStyle(.secondary)
+                    Text(code.userCode).font(.largeTitle.monospaced().weight(.semibold)).textSelection(.enabled)
+                    Button("Copy Code", systemImage: "doc.on.doc") { UIPasteboard.general.string = code.userCode }
+                        .font(.subheadline)
+                }
+                Link(destination: URL(string: code.verificationUrl)!) {
+                    Text("Open ChatGPT").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                Label {
+                    Text("Waiting for you to sign in")
+                } icon: {
+                    ProgressView()
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             } else {
                 Button {
                     Task { await model.signIn() }
                 } label: {
-                    Text("Sign in with ChatGPT").font(.headline).frame(maxWidth: .infinity, minHeight: 34)
+                    Text("Sign In with ChatGPT").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             }
             if let message = model.message {
                 Text(message).font(.footnote).foregroundStyle(.red)
             }
         }
-        .padding(32)
+        .padding(.horizontal, 32)
+        .padding(.bottom)
     }
 }
 
@@ -73,16 +96,7 @@ struct ScreenView: View {
                 ChatView(model: model, screen: screen)
             }
         }
-        .navigationTitle(title)
         .task(id: screen) { await model.load(screen) }
-    }
-
-    private var title: String {
-        switch screen.route {
-        case "conversations": model.list?.title ?? "Conversations"
-        case "new": "New conversation"
-        default: model.conversations[screen.url]?.title ?? ""
-        }
     }
 }
 
@@ -92,24 +106,38 @@ struct ConversationsView: View {
     var body: some View {
         let rows = model.list?.rows ?? []
         List(rows, id: \.id) { row in
-            // A tap opens the deep link the core built for the row, like any other link.
-            Button {
-                model.open(row.url)
-            } label: {
+            // Each row pushes the screen its deep link resolves to, like any other link.
+            NavigationLink(value: model.screen(for: row.url)) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(row.title).foregroundStyle(.primary)
+                    Text(row.title).font(.headline).lineLimit(1)
                     Text(row.subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .listStyle(.plain)
+        .overlay {
+            if model.list != nil, rows.isEmpty {
+                ContentUnavailableView {
+                    Label("No Conversations", systemImage: "bubble.left.and.bubble.right")
+                } description: {
+                    Text("Conversations you start are stored on this iPhone.")
+                } actions: {
+                    Button("Start a Conversation") { model.open("edges://conversations/new") }
                 }
             }
         }
-        .overlay {
-            if model.list != nil, rows.isEmpty {
-                ContentUnavailableView("No conversations yet", systemImage: "bubble.left.and.bubble.right")
-            }
-        }
+        .refreshable { await model.load(Screen(route: "conversations", params: [:], url: AppModel.root)) }
+        .navigationTitle(model.list?.title ?? "Conversations")
         .toolbar {
-            Button("Sign out", action: model.signOut)
-            Button("New", systemImage: "square.and.pencil") { model.open("edges://conversations/new") }
+            ToolbarItem(placement: .topBarLeading) {
+                Menu("More", systemImage: "ellipsis") {
+                    Button("Sign Out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive, action: model.signOut)
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("New Conversation", systemImage: "square.and.pencil") { model.open("edges://conversations/new") }
+            }
         }
     }
 }
@@ -120,34 +148,51 @@ struct ChatView: View {
     @State private var draft = ""
 
     var body: some View {
-        let messages = model.conversations[screen.url]?.messages ?? []
+        let conversation = model.conversations[screen.url]
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                ForEach(messages.indices, id: \.self) { index in
-                    Bubble(message: messages[index])
+            LazyVStack(spacing: 10) {
+                ForEach(Array((conversation?.messages ?? []).enumerated()), id: \.offset) { _, message in
+                    Bubble(message: message)
                 }
                 if let sending = model.sending {
                     Bubble(message: ChatMessage(role: "user", text: sending))
-                    ProgressView().padding()
+                    HStack {
+                        ProgressView().padding(12).background(Color(.secondarySystemFill), in: .rect(cornerRadius: 18))
+                        Spacer()
+                    }
                 }
             }
             .padding()
         }
         .defaultScrollAnchor(.bottom)
+        .scrollDismissesKeyboard(.interactively)
+        .navigationTitle(screen.route == "new" ? "New Conversation" : conversation?.title ?? "")
+        .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) {
-            HStack {
-                TextField("Message", text: $draft, axis: .vertical).textFieldStyle(.roundedBorder)
-                Button("Send", systemImage: "arrow.up.circle.fill") {
-                    let text = draft
-                    draft = ""
-                    Task { await model.send(text, from: screen) }
-                }
-                .labelStyle(.iconOnly).font(.title)
-                .disabled(model.sending != nil || draft.trimmingCharacters(in: .whitespaces).isEmpty)
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField("Message", text: $draft, axis: .vertical)
+                    .lineLimit(1...5)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .overlay(Capsule().stroke(Color(.separator)))
+                    .submitLabel(.send)
+                    .onSubmit(send)
+                Button("Send", systemImage: "arrow.up.circle.fill", action: send)
+                    .labelStyle(.iconOnly)
+                    .font(.system(size: 32))
+                    .disabled(model.sending != nil || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            .padding()
+            .padding(.horizontal)
+            .padding(.vertical, 8)
             .background(.bar)
         }
+    }
+
+    private func send() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, model.sending == nil else { return }
+        draft = ""
+        Task { await model.send(text, from: screen) }
     }
 }
 
@@ -157,12 +202,23 @@ struct Bubble: View {
     var body: some View {
         switch message.role {
         case "user":
-            Text(message.text).padding(10).background(.tint, in: .rect(cornerRadius: 16)).foregroundStyle(.white)
+            Text(message.text)
+                .padding(.horizontal, 14).padding(.vertical, 9)
+                .foregroundStyle(.white)
+                .background(.tint, in: .rect(cornerRadius: 18))
+                .frame(maxWidth: 300, alignment: .trailing)
                 .frame(maxWidth: .infinity, alignment: .trailing)
         case "tool":
-            Label(message.text, systemImage: "wrench.and.screwdriver").font(.caption).foregroundStyle(.secondary)
+            Label("Used \(message.text.replacingOccurrences(of: "_", with: " "))", systemImage: "wrench.and.screwdriver")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
         default:
-            Text(LocalizedStringKey(message.text)).frame(maxWidth: .infinity, alignment: .leading)
+            Text((try? AttributedString(markdown: message.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(message.text))
+                .padding(.horizontal, 14).padding(.vertical, 9)
+                .background(Color(.secondarySystemFill), in: .rect(cornerRadius: 18))
+                .frame(maxWidth: 300, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
