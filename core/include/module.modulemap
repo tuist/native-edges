@@ -1,0 +1,4 @@
+module EdgesCoreFFI {
+    header "edges_core.h"
+    export *
+}

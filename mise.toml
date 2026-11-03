@@ -1,0 +1,54 @@
+[tools]
+"github:tuist/once" = "0.74.2"
+rust = { version = "1.96.0", targets = "aarch64-apple-ios-sim,aarch64-linux-android" }
+java = "temurin-21"
+kotlin = "2.4.20"
+
+[env]
+ANDROID_HOME = "{{ env.ANDROID_HOME | default(value=env.HOME ~ '/Library/Android/sdk') }}"
+ANDROID_NDK_HOME = "{{ env.ANDROID_NDK_HOME | default(value=env.HOME ~ '/Library/Android/sdk/ndk/27.3.13750724') }}"
+
+[tasks."prepare:rust"]
+description = "Vendor the locked crates for Once's per-crate graph"
+run = "CARGO_HTTP_MULTIPLEXING=false cargo vendor --quiet --locked .once/vendor > /dev/null"
+
+[tasks."prepare:android"]
+description = "Verify and unpack the locked Jetpack Compose AARs, and link the toolchain pieces Once needs"
+run = '''
+set -eu
+python3 android/maven.py prepare
+host=linux-x86_64
+if [ "$(uname -s)" = Darwin ]; then host=darwin-x86_64; fi
+ndk_tools="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$host/bin"
+mkdir -p .once/android-tools .once/kotlin
+ln -sf "$ndk_tools/aarch64-linux-android26-clang" .once/android-tools/aarch64-linux-android-clang
+# Kotlin ships the Compose compiler plugin; kotlinc loads it from this stable path.
+ln -sf "$(dirname "$(dirname "$(command -v kotlinc)")")/lib/compose-compiler-plugin.jar" .once/kotlin/compose-compiler-plugin.jar
+'''
+
+[tasks.test]
+depends = ["prepare:rust"]
+description = "Validate the graph and test the core"
+run = ["once query validate-workspace", "once test CoreTests"]
+
+[tasks."build:cli"]
+depends = ["prepare:rust"]
+description = "Build the terminal edge"
+run = "once build CLI"
+
+[tasks."build:ios"]
+depends = ["prepare:rust"]
+description = "Build the SwiftUI edge for the iOS simulator"
+run = "once build IOS"
+
+[tasks."build:android"]
+depends = ["prepare:rust", "prepare:android"]
+description = "Build the Jetpack Compose edge"
+run = '''
+set -eu
+host=linux-x86_64
+if [ "$(uname -s)" = Darwin ]; then host=darwin-x86_64; fi
+export PATH="$PWD/.once/android-tools:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$host/bin:$PATH"
+once build Android
+python3 android/resources.py verify "$ANDROID_HOME/build-tools/36.0.0/aapt2" .once/out/Compose/R.txt .once/out/Android/Android.apk
+'''
